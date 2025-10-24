@@ -1,377 +1,612 @@
-import streamlit as st
-import pandas as pd
-from PIL import Image
+# ================================================================
+# Raven Matrices PRO — 60 Ítems (estructura Big Five PRO)
+# - Auto-avance, fondo blanco, UI PRO, tarjetas + KPIs
+# - Carga perezosa: muestra SOLO la imagen del ítem actual
+# - Imágenes desde GitHub: raven_pagina_001.png ... raven_pagina_060.png
+# - Gabarito opcional: answer_key.json en el mismo repo
+# ================================================================
 import io
-import base64
-import time
-import fitz  # PyMuPDF
+import json
+from io import BytesIO
+from datetime import datetime
+from typing import List, Dict, Optional
 
-# --- CONFIGURACIÓN Y DATOS DEL TEST ---
-# Respuestas correctas del Test de Raven (Standard Progressive Matrices - SPM)
-# Esto se basa en la estructura estándar A1-A12, B1-B12, C1-C12, D1-D12, E1-E12
-# NOTA: Debes verificar la numeración de las opciones en tu PDF, ya que el OCR puede ser imperfecto.
-RESPUESTAS_CORRECTAS = {
-    # SERIE A (12 preguntas)
-    'A1': 4, 'A2': 5, 'A3': 1, 'A4': 2, 'A5': 6, 'A6': 3, 'A7': 6, 'A8': 2, 'A9': 1, 'A10': 3, 'A11': 5, 'A12': 6,
-    # SERIE B (12 preguntas)
-    'B1': 2, 'B2': 6, 'B3': 5, 'B4': 1, 'B5': 2, 'B6': 3, 'B7': 4, 'B8': 6, 'B9': 1, 'B10': 2, 'B11': 3, 'B12': 4,
-    # SERIE C (12 preguntas)
-    'C1': 8, 'C2': 2, 'C3': 3, 'C4': 8, 'C5': 7, 'C6': 3, 'C7': 5, 'C8': 6, 'C9': 4, 'C10': 3, 'C11': 7, 'C12': 2,
-    # SERIE D (12 preguntas)
-    'D1': 3, 'D2': 4, 'D3': 3, 'D4': 7, 'D5': 8, 'D6': 4, 'D7': 2, 'D8': 5, 'D9': 1, 'D10': 6, 'D11': 5, 'D12': 4,
-    # SERIE E (12 preguntas)
-    'E1': 7, 'E2': 6, 'E3': 8, 'E4': 2, 'E5': 1, 'E6': 5, 'E7': 6, 'E8': 7, 'E9': 4, 'E10': 3, 'E11': 8, 'E12': 1,
+import numpy as np
+import pandas as pd
+import streamlit as st
+from PIL import Image
+import plotly.graph_objects as go
+
+# Dependencias opcionales
+HAS_MPL = False
+try:
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+    from matplotlib.patches import FancyBboxPatch
+    HAS_MPL = True
+except Exception:
+    HAS_MPL = False
+
+HAS_REQUESTS = False
+try:
+    import requests
+    HAS_REQUESTS = True
+except Exception:
+    HAS_REQUESTS = False
+
+
+# ---------------------------------------------------------------
+# CONFIG & ESTILO
+# ---------------------------------------------------------------
+st.set_page_config(
+    page_title="Raven PRO | Matrices Progresivas",
+    page_icon="🧩",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+st.markdown("""
+<style>
+/* Ocultar sidebar */
+[data-testid="stSidebar"] { display:none !important; }
+
+/* Base */
+html, body, [data-testid="stAppViewContainer"]{
+  background:#ffffff !important; color:#111 !important;
+  font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+}
+.block-container{ max-width:1200px; padding-top:0.8rem; padding-bottom:2rem; }
+
+/* Tarjetas */
+.card{
+  border:1px solid #eee; border-radius:14px; background:#fff;
+  box-shadow: 0 2px 0 rgba(0,0,0,0.03); padding:18px;
 }
 
-TODAS_PREGUNTAS = list(RESPUESTAS_CORRECTAS.keys())
-TOTAL_PREGUNTAS = len(TODAS_PREGUNTAS)
+/* KPIs */
+.kpi-grid{
+  display:grid; grid-template-columns: repeat(auto-fit, minmax(220px,1fr));
+  gap:12px; margin:10px 0 6px 0;
+}
+.kpi{
+  border:1px solid #eee; border-radius:14px; background:#fff; padding:16px;
+  position:relative; overflow:hidden;
+}
+.kpi::after{
+  content:""; position:absolute; inset:0;
+  background: linear-gradient(120deg, rgba(255,255,255,0) 0%,
+    rgba(240,240,240,0.7) 45%, rgba(255,255,255,0) 90%);
+  transform: translateX(-100%); animation: shimmer 2s ease-in-out 1;
+}
+@keyframes shimmer { to{ transform: translateX(100%);} }
+.kpi .label{ font-size:.95rem; opacity:.85; }
+.kpi .value{ font-size:2.1rem; font-weight:900; line-height:1; }
 
-# --- CONFIGURACIÓN DE PÁGINAS DEL PDF (Asumiendo que las imágenes se extraen por página) ---
-# Mapea Pregunta (A1, A2...) a la Página del PDF (1-based index)
-MAPA_PAGINAS = {
-    'A1': 1, 'A2': 2, 'A3': 3, 'A4': 4, 'A5': 5, 'A6': 6, 'A7': 7, 'A8': 8, 'A9': 9, 'A10': 10, 'A11': 11, 'A12': 12,
-    'B1': 13, 'B2': 14, 'B3': 15, 'B4': 16, 'B5': 17, 'B6': 18, 'B7': 19, 'B8': 20, 'B9': 21, 'B10': 22, 'B11': 23, 'B12': 24,
-    'C1': 25, 'C2': 26, 'C3': 27, 'C4': 28, 'C5': 29, 'C6': 30, 'C7': 31, 'C8': 32, 'C9': 33, 'C10': 34, 'C11': 35, 'C12': 36,
-    'D1': 37, 'D2': 38, 'D3': 39, 'D4': 40, 'D5': 41, 'D6': 42, 'D7': 43, 'D8': 44, 'D9': 45, 'D10': 46, 'D11': 47, 'D12': 48,
-    'E1': 49, 'E2': 50, 'E3': 51, 'E4': 52, 'E5': 53, 'E6': 54, 'E7': 55, 'E8': 56, 'E9': 57, 'E10': 58, 'E11': 59, 'E12': 60,
+/* Pregunta */
+.dim-title{
+  font-size:clamp(2rem, 5vw, 2.8rem);
+  font-weight:900; letter-spacing:.2px; line-height:1.12;
+  margin:.2rem 0 .6rem 0;
+  animation: slideIn .3s ease-out both;
+}
+@keyframes slideIn{
+  from{ transform: translateY(6px); opacity:0; }
+  to{ transform: translateY(0); opacity:1; }
+}
+.badge{
+  display:inline-flex; align-items:center; gap:6px; padding:.25rem .55rem; font-size:.82rem;
+  border-radius:999px; border:1px solid #eaeaea; background:#fafafa;
+}
+.q-image-wrap{
+  display:flex; justify-content:center; align-items:center;
+  background:#fafafa; border:1px solid #eee; border-radius:12px; padding:10px;
+}
+.options-grid{
+  display:grid; grid-template-columns: repeat(auto-fit, minmax(60px,1fr));
+  gap:8px; margin-top:12px;
+}
+.opt{
+  border:1px solid #eee; border-radius:12px; background:#fff; padding:10px;
+  text-align:center; cursor:pointer; transition: transform .06s ease;
+}
+.opt:hover{ transform: translateY(-1px); }
+.opt.selected{ outline:2px solid #111; }
+
+/* Tabla */
+[data-testid="stDataFrame"] div[role="grid"]{ font-size:0.95rem; }
+
+.small{ font-size:0.95rem; opacity:.9; }
+hr{ border:none; border-top:1px solid #eee; margin:16px 0; }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------
+# PARÁMETROS
+# ---------------------------------------------------------------
+SERIES = ["A","B","C","D","E","F"]
+ITEMS_PER_SERIES = 10
+TOTAL_ITEMS = len(SERIES)*ITEMS_PER_SERIES  # 60
+
+# Mapeo de opciones por serie (común en muchas baterías Raven)
+SERIES_OPTIONS = {
+    "A": 6, "B": 6,  # primeras series suelen tener 6 opciones
+    "C": 8, "D": 8, "E": 8, "F": 8
 }
 
-# La mayoría de las preguntas tienen 6 opciones (A1-A12 y B1-B12), C, D y E tienen 8.
-OPCIONES_POR_PREGUNTA = {
-    'A': 6, 'B': 6, 'C': 8, 'D': 8, 'E': 8
-}
+# Base URL de tu repo con las 60 imágenes 001..060
+RAW_BASE = "https://raw.githubusercontent.com/legendss7/Test-Raven-Demo/main"
 
-# --- FUNCIONES DE ESTADO Y FLUJO ---
+def image_url_for_index(idx_0_based: int) -> str:
+    # idx: 0..59 -> nombre raven_pagina_001.png ... raven_pagina_060.png
+    page_num = idx_0_based + 1
+    return f"{RAW_BASE}/raven_pagina_{page_num:03d}.png"
 
-def inicializar_sesion():
-    """Inicializa variables de sesión si no existen."""
-    if 'test_iniciado' not in st.session_state:
-        st.session_state.test_iniciado = False
-    if 'pregunta_actual_idx' not in st.session_state:
-        st.session_state.pregunta_actual_idx = 0
-    if 'respuestas' not in st.session_state:
-        st.session_state.respuestas = {}
-    if 'tiempo_inicio' not in st.session_state:
-        st.session_state.tiempo_inicio = None
-    if 'pdf_subido' not in st.session_state:
-        st.session_state.pdf_subido = False
-    if 'pdf_content' not in st.session_state:
-        st.session_state.pdf_content = None
+# Gabarito: se intenta cargar answer_key.json de tu repo (si existe)
+# Estructura esperada:
+# {
+#   "A": {"1": 3, "2": 2, ..., "10": 5},
+#   "B": {...}, ... "F": {...}
+# }
+DEFAULT_KEY = {}  # si no hay clave, se dejan vacías (la app sigue operativa)
 
-def siguiente_pregunta(seleccion):
-    """Guarda la respuesta y avanza a la siguiente pregunta."""
-    pregunta_id = TODAS_PREGUNTAS[st.session_state.pregunta_actual_idx]
-    st.session_state.respuestas[pregunta_id] = seleccion
-
-    # Asegura la transición automática a la siguiente pregunta o al resultado
-    if st.session_state.pregunta_actual_idx < TOTAL_PREGUNTAS - 1:
-        st.session_state.pregunta_actual_idx += 1
-    else:
-        st.session_state.test_iniciado = 'finalizado'
-
-def reiniciar_test():
-    """Resetea el estado para comenzar de nuevo."""
-    st.session_state.test_iniciado = False
-    st.session_state.pregunta_actual_idx = 0
-    st.session_state.respuestas = {}
-    st.session_state.tiempo_inicio = None
-    st.session_state.pdf_subido = False
-    st.session_state.pdf_content = None
-
-# --- MANEJO DE IMÁGENES DEL PDF CON PYMUPDF ---
-
-@st.cache_resource
-def obtener_imagen_pagina(pdf_content, pagina_numero):
-    """Extrae la imagen de una página específica del PDF con PyMuPDF."""
+@st.cache_data(show_spinner=False)
+def fetch_answer_key(url: str) -> Dict[str, Dict[int, int]]:
+    if not HAS_REQUESTS:
+        return DEFAULT_KEY
     try:
-        # Abrir el documento desde el contenido binario
-        doc = fitz.open(stream=pdf_content, filetype="pdf")
-        
-        # Número de página es 1-based, PyMuPDF es 0-based
-        pagina = doc.load_page(pagina_numero - 1)
-        
-        # Crear un píxmap para renderizar la página
-        # El parámetro 'dpi' (e.g., 300) puede mejorar la calidad de la imagen
-        zoom = 2  # Factor de zoom (e.g., 2 = 200 DPI si el PDF es 72 DPI)
-        matriz = fitz.Matrix(zoom, zoom)
-        pix = pagina.get_pixmap(matrix=matriz, dpi=300)
-        
-        # Convertir a imagen PIL
-        img_data = pix.tobytes("ppm")
-        img = Image.open(io.BytesIO(img_data))
-        
-        doc.close()
-        return img
-    except Exception as e:
-        st.error(f"Error al procesar la página {pagina_numero}: {e}")
-        return None
+        r = requests.get(url, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+        # normalizar a int
+        out = {}
+        for s, mp in data.items():
+            out[s] = {int(k): int(v) for k, v in mp.items()}
+        return out
+    except Exception:
+        return DEFAULT_KEY
 
-# --- GENERACIÓN DE INFORME PDF CON PYMUPDF ---
+ANSWER_KEY = fetch_answer_key(f"{RAW_BASE}/answer_key.json")
 
-def generar_informe_pdf(df_resultados, df_categorias, puntaje_total, tiempo_transcurrido):
-    """Genera un informe PDF profesional con los resultados y gráficos."""
-    doc = fitz.open()  # Crear un nuevo documento PDF
-    ancho, alto = fitz.paper_size('a4')
-    pagina = doc.new_page(width=ancho, height=alto)
-    
-    # Fuentes y Posiciones
-    x_margen = 50
-    y_pos = 50
-    line_height = 20
-    
-    # Título Principal
-    pagina.insert_text((x_margen, y_pos), "INFORME COMPLETO - TEST DE RAVEN (SPM)", fontsize=18, fontname="helv-bold")
-    y_pos += 2 * line_height
-    
-    # 1. Resumen General (KPIs)
-    pagina.insert_text((x_margen, y_pos), "1. Resumen de Resultados", fontsize=14, fontname="helv-bold")
-    y_pos += line_height
-    
-    # KPI 1: Puntaje Total
-    pagina.insert_text((x_margen, y_pos), f"Puntaje Total Obtenido:", fontsize=12, fontname="helv-bold")
-    pagina.insert_text((x_margen + 200, y_pos), f"{puntaje_total} / {TOTAL_PREGUNTAS}", fontsize=12, fontname="helv")
-    y_pos += line_height
-    
-    # KPI 2: Tiempo Total
-    pagina.insert_text((x_margen, y_pos), f"Tiempo Total Empleado:", fontsize=12, fontname="helv-bold")
-    pagina.insert_text((x_margen + 200, y_pos), f"{tiempo_transcurrido:.2f} segundos", fontsize=12, fontname="helv")
-    y_pos += 2 * line_height
 
-    # 2. Resultados por Serie (Tabla)
-    pagina.insert_text((x_margen, y_pos), "2. Desglose de Puntajes por Serie", fontsize=14, fontname="helv-bold")
-    y_pos += line_height
-    
-    # Cabecera de la tabla
-    headers = ["Serie", "Respuestas Correctas", "Porcentaje (%)"]
-    col_widths = [100, 200, 200]
-    
-    current_x = x_margen
-    for i, header in enumerate(headers):
-        pagina.insert_text((current_x, y_pos), header, fontsize=10, fontname="helv-bold")
-        current_x += col_widths[i]
-    y_pos += line_height
-    
-    # Datos de la tabla
-    for index, row in df_categorias.iterrows():
-        current_x = x_margen
-        pagina.insert_text((current_x, y_pos), row['Serie'], fontsize=10, fontname="helv")
-        current_x += col_widths[0]
-        pagina.insert_text((current_x, y_pos), str(row['Correctas']), fontsize=10, fontname="helv")
-        current_x += col_widths[1]
-        pagina.insert_text((current_x, y_pos), f"{row['Porcentaje']:.2f}%", fontsize=10, fontname="helv")
-        y_pos += line_height
-    
-    y_pos += line_height
-    
-    # 3. Detalle de Respuestas
-    pagina.insert_text((x_margen, y_pos), "3. Detalle de Respuestas", fontsize=14, fontname="helv-bold")
-    y_pos += line_height
-    
-    # Agregar detalle pregunta por pregunta (solo las primeras 10 para concisión)
-    detalle_headers = ["Pregunta", "Tu Respuesta", "Respuesta Correcta", "Resultado"]
-    col_widths_detalle = [80, 100, 150, 100]
-    
-    current_x = x_margen
-    for i, header in enumerate(detalle_headers):
-        pagina.insert_text((current_x, y_pos), header, fontsize=10, fontname="helv-bold")
-        current_x += col_widths_detalle[i]
-    y_pos += line_height
-    
-    # Datos del detalle
-    for index, row in df_resultados.head(10).iterrows():
-        current_x = x_margen
-        color = (0, 0.5, 0) if row['Resultado'] == 'Correcto' else (0.5, 0, 0)
-        
-        pagina.insert_text((current_x, y_pos), row['Pregunta'], fontsize=10, fontname="helv")
-        current_x += col_widths_detalle[0]
-        pagina.insert_text((current_x, y_pos), str(row['Tu Respuesta']), fontsize=10, fontname="helv")
-        current_x += col_widths_detalle[1]
-        pagina.insert_text((current_x, y_pos), str(row['Respuesta Correcta']), fontsize=10, fontname="helv")
-        current_x += col_widths_detalle[2]
-        pagina.insert_text((current_x, y_pos), row['Resultado'], fontsize=10, fontname="helv-bold", color=color)
-        y_pos += line_height
-        
-        if y_pos > alto - 50:
-            pagina = doc.new_page(width=ancho, height=alto)
-            y_pos = 50
+# ---------------------------------------------------------------
+# MANIFIESTO DE ÍTEMS (60)
+# ---------------------------------------------------------------
+def build_manifest() -> List[Dict]:
+    items = []
+    for si, s in enumerate(SERIES):
+        for k in range(1, ITEMS_PER_SERIES+1):
+            iid = si*ITEMS_PER_SERIES + k  # 1..60
+            n_opts = SERIES_OPTIONS[s]
+            items.append({
+                "id": iid,
+                "series": s,
+                "index": k,
+                "n_options": n_opts,
+                "correct": ANSWER_KEY.get(s, {}).get(k, None)
+            })
+    return items
 
-    # Guardar el PDF en un buffer
-    pdf_buffer = io.BytesIO()
-    doc.save(pdf_buffer)
-    doc.close()
-    return pdf_buffer.getvalue()
+if "items" not in st.session_state:
+    st.session_state.items = build_manifest()
 
-# --- VISTAS DE STREAMLIT ---
 
-def mostrar_pantalla_inicio():
-    """Pantalla inicial para subir el PDF y comenzar el test."""
-    st.title("🧩 Test de Matrices Progresivas de Raven (SPM)")
-    st.header("Herramienta de Evaluación Digital")
-    st.markdown("Esta aplicación simula el Test de Raven utilizando un archivo PDF proporcionado por el usuario, procesando cada página como una pregunta.")
+# ---------------------------------------------------------------
+# ESTADO
+# ---------------------------------------------------------------
+if "stage" not in st.session_state: st.session_state.stage = "inicio"  # inicio | test | resultados
+if "q_idx" not in st.session_state: st.session_state.q_idx = 0
+if "answers" not in st.session_state: st.session_state.answers = {}  # item_id -> int (1..n)
+if "fecha" not in st.session_state: st.session_state.fecha = None
+if "_needs_rerun" not in st.session_state: st.session_state._needs_rerun = False
 
-    if not st.session_state.pdf_subido:
-        # Subida del archivo
-        uploaded_file = st.file_uploader(
-            "Sube el archivo PDF del 'Test de Raven_Mejorar_OCR.pdf' para comenzar.", 
-            type="pdf"
+
+# ---------------------------------------------------------------
+# CÁLCULO DE RESULTADOS
+# ---------------------------------------------------------------
+def compute_results(answers: Dict[int,int], items: List[Dict]) -> Dict:
+    rows = []
+    for it in items:
+        iid = it["id"]; s = it["series"]; k = it["index"]
+        n_opts = it["n_options"]; correct = it["correct"]
+        rta = answers.get(iid, None)
+        is_correct = (rta == correct) if (correct is not None and rta is not None) else None
+        rows.append({
+            "item_id": iid, "serie": s, "index": k, "n_options": n_opts,
+            "respuesta": rta, "correcta": correct, "acierto": is_correct
+        })
+    df = pd.DataFrame(rows).sort_values(["serie","index"]).reset_index(drop=True)
+    n_answered = df["respuesta"].notna().sum()
+    n_with_key = df["correcta"].notna().sum()
+    n_correct = df["acierto"].sum() if df["acierto"].notna().any() else np.nan
+    pct = (n_correct / n_with_key * 100) if (n_with_key and pd.notna(n_correct)) else np.nan
+
+    by_series = (
+        df.groupby("serie")
+          .agg(total=("item_id","count"),
+               contestados=("respuesta", lambda x: x.notna().sum()),
+               con_clave=("correcta", lambda x: x.notna().sum()),
+               aciertos=("acierto", lambda x: x.sum(skipna=True)))
+          .reset_index()
+    )
+    by_series["% acierto"] = np.where(
+        by_series["con_clave"]>0, (by_series["aciertos"]/by_series["con_clave"])*100, np.nan
+    )
+
+    # proxy dificultad (posición global A1..F10)
+    df["pos_global"] = (df["serie"].map({s:i for i,s in enumerate(SERIES)}))*ITEMS_PER_SERIES + df["index"]
+    df["dificultad"] = df["pos_global"]
+
+    return {
+        "df": df,
+        "totales": {
+            "contestados": int(n_answered),
+            "con_clave": int(n_with_key),
+            "aciertos": int(n_correct) if pd.notna(n_correct) else None,
+            "porcentaje": float(pct) if pd.notna(pct) else None
+        },
+        "series": by_series.sort_values("serie").reset_index(drop=True)
+    }
+
+
+# ---------------------------------------------------------------
+# GRÁFICOS
+# ---------------------------------------------------------------
+def plot_series_bars(by_series: pd.DataFrame):
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=by_series["serie"], y=by_series["% acierto"],
+        text=[f"{x:.1f}%" if pd.notna(x) else "-" for x in by_series["% acierto"]],
+        textposition="outside",
+        marker=dict(color=["#81B29A","#F2CC8F","#E07A5F","#9C6644","#6D597A","#84A59D"])
+    ))
+    fig.update_layout(
+        template="plotly_white",
+        height=420,
+        yaxis=dict(title="% acierto", range=[0,100]),
+        xaxis=dict(title="Serie"),
+        margin=dict(l=40, r=40, t=40, b=40)
+    )
+    return fig
+
+def plot_difficulty_curve(df: pd.DataFrame):
+    tmp = df.copy()
+    tmp["ok"] = tmp["acierto"].fillna(False).astype(int)
+    tmp = tmp.sort_values("pos_global")
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=tmp["pos_global"],
+        y=tmp["ok"].rolling(5, min_periods=1).mean()*100,
+        mode="lines+markers",
+        name="Media móvil aciertos (x5)",
+        line=dict(width=2)
+    ))
+    fig.update_layout(
+        template="plotly_white",
+        height=420,
+        yaxis=dict(title="% acierto (rolling x5)", range=[0,100]),
+        xaxis=dict(title="Progresión (A1 → F10)"),
+        margin=dict(l=40, r=40, t=40, b=40)
+    )
+    return fig
+
+
+# ---------------------------------------------------------------
+# PDF/HTML Reporte
+# ---------------------------------------------------------------
+def _pdf_card(ax, x,y,w,h,title,val):
+    r = FancyBboxPatch((x,y), w,h, boxstyle="round,pad=0.012,rounding_size=0.018",
+                       edgecolor="#dddddd", facecolor="#ffffff")
+    ax.add_patch(r)
+    ax.text(x+w*0.06, y+h*0.60, title, fontsize=10, color="#333")
+    ax.text(x+w*0.06, y+h*0.25, f"{val}", fontsize=20, fontweight='bold')
+
+def build_pdf_report(result: Dict, fecha: str) -> bytes:
+    df = result["df"]; tot = result["totales"]; bys = result["series"]
+    pct = tot["porcentaje"] if tot["porcentaje"] is not None else 0.0
+
+    buf = BytesIO()
+    with PdfPages(buf) as pdf:
+        # KPIs
+        fig = plt.figure(figsize=(8.27,11.69))
+        ax = fig.add_axes([0,0,1,1]); ax.axis('off')
+        ax.text(.5,.94,"Informe — Matrices Progresivas de Raven", ha='center', fontsize=20, fontweight='bold')
+        ax.text(.5,.91,f"Fecha: {fecha}", ha='center', fontsize=11)
+
+        Y0 = .80; H = .10; W = .40; GAP = .02
+        _pdf_card(ax, .06, Y0, W, H, "Ítems contestados", str(tot["contestados"]))
+        _pdf_card(ax, .54, Y0, W, H, "Ítems con clave", str(tot["con_clave"]))
+        _pdf_card(ax, .06, Y0-(H+GAP), W, H, "Aciertos", str(tot["aciertos"]) if tot["aciertos"] is not None else "—")
+        _pdf_card(ax, .54, Y0-(H+GAP), W, H, "% Acierto", f"{pct:.1f}%")
+
+        ax.text(.5,.58,"Resumen por Series", ha='center', fontsize=14, fontweight='bold')
+        ylist = .54
+        for _, r in bys.iterrows():
+            s = r["serie"]; p = r["% acierto"]
+            ax.text(.12, ylist, f"Serie {s}: {p:.1f}% acierto" if pd.notna(p) else f"Serie {s}: —", fontsize=11)
+            ylist -= 0.03
+        pdf.savefig(fig, bbox_inches='tight'); plt.close(fig)
+
+        # Detalle por ítem
+        fig2 = plt.figure(figsize=(8.27,11.69)); ax2 = fig2.add_axes([0,0,1,1]); ax2.axis('off')
+        ax2.text(.5,.96,"Detalle por ítem", ha='center', fontsize=16, fontweight='bold')
+
+        def draw_block(df_block, y0):
+            yy = y0
+            for _, rr in df_block.iterrows():
+                s = rr["serie"]; k = rr["index"]; a = rr["respuesta"]; c = rr["correcta"]; ok = rr["acierto"]
+                t = f"{s}{k:02d}  —  resp: {a if pd.notna(a) else '—'} · ok: {c if pd.notna(c) else '—'} · {'✔' if ok else '✘' if ok is not None else ' '}"
+                ax2.text(.08, yy, t, fontsize=10)
+                yy -= 0.025
+            return yy
+
+        start = 0; ystart = .90
+        while start < len(df):
+            end = min(start+22, len(df))
+            ystart = draw_block(df.iloc[start:end], ystart)
+            start = end
+            if start < len(df):
+                pdf.savefig(fig2, bbox_inches='tight'); plt.close(fig2)
+                fig2 = plt.figure(figsize=(8.27,11.69)); ax2 = fig2.add_axes([0,0,1,1]); ax2.axis('off'); ystart = .90
+                ax2.text(.5,.96,"Detalle por ítem (cont.)", ha='center', fontsize=16, fontweight='bold')
+
+        pdf.savefig(fig2, bbox_inches='tight'); plt.close(fig2)
+
+    buf.seek(0)
+    return buf.read()
+
+def build_html_report(result: Dict, fecha: str) -> bytes:
+    df = result["df"]; tot = result["totales"]; bys = result["series"]
+    pct = tot["porcentaje"]
+    rows = ""
+    for _, r in df.iterrows():
+        rows += f"<tr><td>{r['serie']}{r['index']:02d}</td><td>{r['respuesta'] if pd.notna(r['respuesta']) else '—'}</td><td>{r['correcta'] if pd.notna(r['correcta']) else '—'}</td><td>{'✔' if r['acierto'] else ('✘' if r['acierto'] is not None else ' ')}</td></tr>"
+    srows = ""
+    for _, r in bys.iterrows():
+        val = (f"{r['% acierto']:.1f}%" if pd.notna(r['% acierto']) else "—")
+        srows += f"<tr><td>{r['serie']}</td><td>{r['total']}</td><td>{r['contestados']}</td><td>{r['con_clave']}</td><td>{val}</td></tr>"
+    html = f"""<!doctype html>
+<html><head><meta charset="utf-8" />
+<title>Informe Raven</title>
+<style>
+body{{font-family:Inter,Arial; margin:24px; color:#111;}}
+h1{{font-size:24px; margin:0 0 8px 0;}}
+h3{{font-size:18px; margin:.2rem 0;}}
+table{{border-collapse:collapse; width:100%; margin-top:8px}}
+th,td{{border:1px solid #eee; padding:8px; text-align:left;}}
+.kpi-grid{{display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; margin:10px 0 6px 0;}}
+.kpi{{border:1px solid #eee; border-radius:12px; padding:12px; background:#fff;}}
+.kpi .label{{font-size:13px; opacity:.85}}
+.kpi .value{{font-size:22px; font-weight:800}}
+@media print{{ .no-print{{display:none}} }}
+</style>
+</head><body>
+<h1>Informe — Matrices Progresivas de Raven</h1>
+<p>Fecha: <b>{fecha}</b></p>
+<div class="kpi-grid">
+  <div class="kpi"><div class="label">Ítems contestados</div><div class="value">{tot["contestados"]}</div></div>
+  <div class="kpi"><div class="label">Ítems con clave</div><div class="value">{tot["con_clave"]}</div></div>
+  <div class="kpi"><div class="label">Aciertos</div><div class="value">{tot["aciertos"] if tot["aciertos"] is not None else '—'}</div></div>
+  <div class="kpi"><div class="label">% Acierto</div><div class="value">{f'{pct:.1f}%' if pct else '—'}</div></div>
+</div>
+
+<h3>Resumen por series</h3>
+<table>
+<thead><tr><th>Serie</th><th>Ítems</th><th>Contestados</th><th>Con clave</th><th>% acierto</th></tr></thead>
+<tbody>{srows}</tbody>
+</table>
+
+<h3>Detalle por ítem</h3>
+<table>
+<thead><tr><th>Ítem</th><th>Respuesta</th><th>Correcta</th><th>OK</th></tr></thead>
+<tbody>{rows}</tbody>
+</table>
+
+<div class="no-print" style="margin-top:16px;">
+  <button onclick="window.print()" style="padding:10px 14px; border:1px solid #ddd; background:#f9f9f9; border-radius:8px; cursor:pointer;">
+    Imprimir / Guardar como PDF
+  </button>
+</div>
+</body></html>"""
+    return html.encode("utf-8")
+
+
+# ---------------------------------------------------------------
+# CALLBACK (auto-avance sin doble click)
+# ---------------------------------------------------------------
+def on_answer(item_id: int, value: int):
+    st.session_state.answers[item_id] = value
+    if st.session_state.q_idx < TOTAL_ITEMS - 1:
+        st.session_state.q_idx += 1
+    else:
+        st.session_state.stage = "resultados"
+        st.session_state.fecha = datetime.now().strftime("%d/%m/%Y %H:%M")
+    st.session_state._needs_rerun = True
+
+
+# ---------------------------------------------------------------
+# VISTAS
+# ---------------------------------------------------------------
+def view_inicio():
+    st.markdown(
+        """
+        <div class="card">
+          <h1 style="margin:0 0 6px 0; font-size:clamp(2.2rem,3.8vw,3rem); font-weight:900;">
+            🧩 Test de Matrices Progresivas de Raven — PRO
+          </h1>
+          <p class="small" style="margin:0;">Fondo blanco · Texto negro · Diseño profesional y responsivo</p>
+        </div>
+        """, unsafe_allow_html=True
+    )
+    c1, c2 = st.columns([1.35,1])
+    with c1:
+        st.markdown(
+            """
+            <div class="card">
+              <h3 style="margin-top:0">¿Qué evalúa?</h3>
+              <p>Razonamiento analógico y detección de patrones. 60 ítems (Series A–F, 10 cada una).</p>
+              <ul style="line-height:1.6">
+                <li>Una figura por pantalla; eliges la alternativa; <b>auto-avance</b>.</li>
+                <li>Resultados con KPIs, % por serie, curva de dificultad y reporte PDF/HTML.</li>
+              </ul>
+            </div>
+            """, unsafe_allow_html=True
         )
-        
-        if uploaded_file is not None:
-            st.session_state.pdf_content = uploaded_file.read()
-            st.session_state.pdf_subido = True
-            st.experimental_rerun()
-    else:
-        st.success("PDF cargado correctamente. Listo para comenzar el test.")
-        if st.button("Iniciar Test de Raven (60 Preguntas)", help="Comenzar la evaluación cronometrada."):
-            st.session_state.test_iniciado = 'en_curso'
-            st.session_state.tiempo_inicio = time.time()
-            st.experimental_rerun()
+    with c2:
+        st.markdown(
+            """
+            <div class="card">
+              <h3 style="margin-top:0">Imágenes</h3>
+              <p>Se cargarán directamente desde tu repo:</p>
+              <code>legendss7/Test-Raven-Demo/main/raven_pagina_001.png ... 060.png</code>
+              <p>No necesitas subir nada extra mientras mantengas nombres y ruta.</p>
+            </div>
+            """, unsafe_allow_html=True
+        )
 
-def mostrar_test_en_curso():
-    """Muestra la pregunta actual y maneja la lógica de avance."""
-    st.title("🧠 Evaluación en Curso")
+        if st.button("🚀 Iniciar evaluación", type="primary", use_container_width=True):
+            st.session_state.stage = "test"
+            st.session_state.q_idx = 0
+            st.session_state.answers = {}
+            st.session_state.fecha = None
+            st.rerun()
 
-    # Calculo de tiempo transcurrido
-    tiempo_actual = time.time()
-    tiempo_transcurrido = tiempo_actual - st.session_state.tiempo_inicio
-    
-    # Header e Indicador de progreso
-    col1, col2 = st.columns([3, 1])
-    pregunta_id = TODAS_PREGUNTAS[st.session_state.pregunta_actual_idx]
-    
-    col1.header(f"Pregunta {st.session_state.pregunta_actual_idx + 1} de {TOTAL_PREGUNTAS}: {pregunta_id}")
-    col2.metric("Tiempo Transcurrido", f"{tiempo_transcurrido:.0f} s")
 
-    st.progress((st.session_state.pregunta_actual_idx + 1) / TOTAL_PREGUNTAS)
-    
-    # 1. Obtener y mostrar la imagen de la pregunta
-    pagina_num = MAPA_PAGINAS.get(pregunta_id)
-    if st.session_state.pdf_content and pagina_num:
-        # Usar la función de caché para la imagen
-        img = obtener_imagen_pagina(st.session_state.pdf_content, pagina_num)
-        if img:
-            st.image(img, use_column_width=True, caption=f"Matriz de la pregunta {pregunta_id}")
-        else:
-            st.error("No se pudo cargar la imagen de la pregunta.")
-    else:
-        st.error("Error: Contenido del PDF no disponible o ID de pregunta inválida.")
+def view_test():
+    i = st.session_state.q_idx
+    items = st.session_state.items
+    it = items[i]
+    s = it["series"]; k = it["index"]; iid = it["id"]
+    n_opts = it["n_options"]
 
-    # 2. Botones de Respuesta (Opciones)
-    serie = pregunta_id[0]
-    num_opciones = OPCIONES_POR_PREGUNTA.get(serie, 6) # Valor por defecto 6
-    opciones = list(range(1, num_opciones + 1))
-
-    st.subheader("Selecciona la pieza que completa la matriz:")
-    
-    # Crear botones de respuesta en filas
-    cols = st.columns(num_opciones if num_opciones <= 8 else 6)
-    for i, opcion in enumerate(opciones):
-        if cols[i % len(cols)].button(f"Opción {opcion}", key=f"btn_{pregunta_id}_{opcion}"):
-            siguiente_pregunta(opcion)
-            st.experimental_rerun() # Fuerza el avance automático
-            
+    st.progress((i+1)/TOTAL_ITEMS, text=f"Progreso: {i+1}/{TOTAL_ITEMS}")
+    st.markdown(f"<div class='dim-title'>Serie {s} — Ítem {k:02d}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='badge'>Opciones: {n_opts}</div>", unsafe_allow_html=True)
     st.markdown("---")
-    # Botón para saltar (opcional, para desarrollo/test)
-    if st.button("Saltar Pregunta (No Recomendado en un Test Real)", key="skip_btn"):
-        siguiente_pregunta('Saltada')
-        st.experimental_rerun()
 
-def mostrar_resultados():
-    """Calcula y muestra los resultados detallados y la opción de descarga."""
-    st.title("🎉 Test Finalizado - Resultados Detallados")
-    
-    tiempo_fin = time.time()
-    tiempo_transcurrido = tiempo_fin - st.session_state.tiempo_inicio
-    
-    # 1. Procesamiento de Resultados
-    df_respuestas = pd.DataFrame(st.session_state.respuestas.items(), columns=['Pregunta', 'Tu Respuesta'])
-    df_respuestas['Respuesta Correcta'] = df_respuestas['Pregunta'].map(RESPUESTAS_CORRECTAS)
-    
-    # Excluir preguntas saltadas/no respondidas (cuyo valor es 'Saltada')
-    df_resultados = df_respuestas[df_respuestas['Tu Respuesta'] != 'Saltada'].copy()
-    
-    df_resultados['Correcto'] = df_resultados['Tu Respuesta'] == df_resultados['Respuesta Correcta']
-    df_resultados['Resultado'] = df_resultados['Correcto'].apply(lambda x: 'Correcto' if x else 'Incorrecto')
-    
-    puntaje_total = df_resultados['Correcto'].sum()
-    
-    # 2. Análisis por Serie
-    df_resultados['Serie'] = df_resultados['Pregunta'].str.extract(r'([A-E])')
-    df_categorias = df_resultados.groupby('Serie')['Correcto'].sum().reset_index(name='Correctas')
-    df_categorias['Total'] = 12
-    df_categorias['Porcentaje'] = (df_categorias['Correctas'] / df_categorias['Total']) * 100
-    
-    # --- 3. Despliegue de KPIs y Métricas ---
-    st.header("Resumen General")
-    col1, col2, col3 = st.columns(3)
-    
-    # KPI 1: Puntaje Total
-    col1.metric(
-        label="Puntaje Total", 
-        value=f"{puntaje_total} / {TOTAL_PREGUNTAS}", 
-        delta=f"{(puntaje_total / TOTAL_PREGUNTAS) * 100:.1f}% de acierto"
-    )
-    
-    # KPI 2: Tiempo Transcurrido
-    col2.metric(
-        label="Tiempo Total Empleado", 
-        value=f"{tiempo_transcurrido:.2f} segundos", 
-        delta=f"Tiempo promedio por pregunta: {tiempo_transcurrido / puntaje_total:.2f} s" if puntaje_total > 0 else "N/A"
-    )
-    
-    # KPI 3: Preguntas Saltadas
-    saltadas = (df_respuestas['Tu Respuesta'] == 'Saltada').sum()
-    col3.metric(
-        label="Preguntas Saltadas/Omitidas",
-        value=saltadas
+    with st.container():
+        st.markdown("<div class='card'>", unsafe_allow_html=True)
+
+        # Imagen (carga perezosa desde URL)
+        url = image_url_for_index(i)
+        try:
+            # st.image puede leer URL directamente (no descargamos toda la batería)
+            st.markdown("<div class='q-image-wrap'>", unsafe_allow_html=True)
+            st.image(url, use_container_width=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+        except Exception:
+            st.error("No pude cargar la imagen desde GitHub. Verifica el nombre/ruta.")
+
+        # Opciones 1..n_opts (auto-avance)
+        st.markdown("<div class='options-grid'>", unsafe_allow_html=True)
+        cols = st.columns(n_opts)
+        prev = st.session_state.answers.get(iid, None)
+        for opt in range(1, n_opts+1):
+            with cols[opt-1]:
+                pressed = st.button(f"{opt}", use_container_width=True, key=f"opt_{iid}_{opt}")
+                if prev == opt:
+                    st.markdown("<div class='opt selected'>Seleccionado</div>", unsafe_allow_html=True)
+                else:
+                    st.markdown("<div class='opt'> </div>", unsafe_allow_html=True)
+                if pressed:
+                    on_answer(iid, opt)
+        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+
+def view_resultados():
+    res = compute_results(st.session_state.answers, st.session_state.items)
+    df = res["df"]; tot = res["totales"]; bys = res["series"]
+    pct = res["totales"]["porcentaje"]
+    fecha = st.session_state.fecha
+
+    st.markdown(
+        f"""
+        <div class="card">
+          <h1 style="margin:0 0 6px 0; font-size:clamp(2.2rem,3.8vw,3rem); font-weight:900;">
+            📊 Informe Raven — Resultados
+          </h1>
+          <p class="small" style="margin:0;">Fecha: <b>{fecha}</b></p>
+        </div>
+        """, unsafe_allow_html=True
     )
 
-    # --- 4. Gráfico de Resultados por Serie (Usando Streamlit nativo) ---
-    st.header("Análisis de Resultados por Serie (A-E)")
-    st.dataframe(df_categorias, hide_index=True)
-    
-    st.bar_chart(df_categorias.set_index('Serie')['Porcentaje'])
-    
-    # --- 5. Detalle de Respuestas y Descarga ---
-    st.header("Detalle de Respuestas")
-    st.dataframe(df_resultados[['Pregunta', 'Tu Respuesta', 'Respuesta Correcta', 'Resultado']], 
-                 hide_index=True, 
-                 use_container_width=True)
-                 
-    # 6. Generación de PDF
-    st.subheader("Descargar Informe Completo (PDF)")
-    
-    # Generar el contenido binario del PDF
-    pdf_data = generar_informe_pdf(df_resultados, df_categorias, puntaje_total, tiempo_transcurrido)
-    
-    # Botón de descarga con el archivo binario
-    st.download_button(
-        label="📥 Descargar Informe PDF",
-        data=pdf_data,
-        file_name="Informe_Test_Raven_Completo.pdf",
-        mime="application/pdf"
-    )
-    
-    st.button("Comenzar Nuevo Test", on_click=reiniciar_test)
+    st.markdown("<div class='kpi-grid'>", unsafe_allow_html=True)
+    st.markdown(f"<div class='kpi'><div class='label'>Ítems contestados</div><div class='value'>{tot['contestados']}</div></div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='kpi'><div class='label'>Ítems con clave</div><div class='value'>{tot['con_clave']}</div></div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='kpi'><div class='label'>Aciertos</div><div class='value'>{tot['aciertos'] if tot['aciertos'] is not None else '—'}</div></div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='kpi'><div class='label'>% Acierto</div><div class='value'>{f'{pct:.1f}%' if pct else '—'}</div></div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
-# --- FUNCIÓN PRINCIPAL DE LA APLICACIÓN ---
+    st.markdown("---")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("📊 % acierto por serie")
+        st.plotly_chart(plot_series_bars(bys), use_container_width=True)
+    with c2:
+        st.subheader("📈 Curva de dificultad (proxy)")
+        st.plotly_chart(plot_difficulty_curve(df), use_container_width=True)
 
-def main():
-    st.set_page_config(
-        page_title="Test de Raven Completo",
-        layout="wide",
-        initial_sidebar_state="expanded"
-    )
-    
-    inicializar_sesion()
-    
-    # Lógica de navegación entre pantallas
-    if not st.session_state.test_iniciado:
-        mostrar_pantalla_inicio()
-    elif st.session_state.test_iniciado == 'en_curso':
-        mostrar_test_en_curso()
-    elif st.session_state.test_iniciado == 'finalizado':
-        mostrar_resultados()
+    st.markdown("---")
+    st.subheader("📋 Tabla de resultados por ítem")
+    show = df.copy()
+    show["ítem"] = show["serie"] + show["index"].apply(lambda x: f"{x:02d}")
+    show["OK"] = show["acierto"].map(lambda x: "✔" if x is True else ("✘" if x is False else " "))
+    show = show[["ítem","n_options","respuesta","correcta","OK"]]
+    st.dataframe(show, use_container_width=True, hide_index=True)
 
-if __name__ == "__main__":
-    main()
+    st.markdown("---")
+    st.subheader("🔎 Errores (para revisión)")
+    wrong = df[df["acierto"] == False].copy()
+    if wrong.empty:
+        st.success("¡Sin errores (o no hay clave de corrección)! 🎉")
+    else:
+        wrong["ítem"] = wrong["serie"] + wrong["index"].apply(lambda x: f"{x:02d}")
+        wrong = wrong[["ítem","respuesta","correcta"]]
+        st.dataframe(wrong, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    st.subheader("📥 Exportar informe")
+    if HAS_MPL:
+        pdf_bytes = build_pdf_report(res, fecha)
+        st.download_button(
+            "⬇️ Descargar PDF (servidor)",
+            data=pdf_bytes,
+            file_name="Informe_Raven_PRO.pdf",
+            mime="application/pdf",
+            use_container_width=True
+        )
+    else:
+        html_bytes = build_html_report(res, fecha)
+        st.download_button(
+            "⬇️ Descargar Reporte (HTML) — Imprime como PDF",
+            data=html_bytes,
+            file_name="Informe_Raven_PRO.html",
+            mime="text/html",
+            use_container_width=True
+        )
+        st.caption("Para PDF directo, instala Matplotlib en el entorno.")
+
+    st.markdown("---")
+    if st.button("🔄 Nueva evaluación", type="primary", use_container_width=True):
+        st.session_state.stage = "inicio"
+        st.session_state.q_idx = 0
+        st.session_state.answers = {}
+        st.session_state.fecha = None
+        st.rerun()
+
+
+# ---------------------------------------------------------------
+# FLUJO
+# ---------------------------------------------------------------
+if st.session_state.stage == "inicio":
+    view_inicio()
+elif st.session_state.stage == "test":
+    view_test()
+else:
+    view_resultados()
+
+# Rerun único si lo marcó el callback
+if st.session_state._needs_rerun:
+    st.session_state._needs_rerun = False
+    st.rerun()

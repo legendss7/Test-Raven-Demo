@@ -1,10 +1,10 @@
 # ======================================================================
-#  Raven PRO — 60 ítems, imágenes perezosas, UI rápida y export diferido
-#  - Sin trabajo pesado al cargar (inicio inmediato)
-#  - Imágenes PIL al vuelo (sólo del ítem actual)
-#  - Ocho botones por alternativa (sin radio/index=None)
-#  - Autoavance inmediato y sin doble clic
-#  - Reportes: se GENERAN al hacer clic y recién ahí aparece "Descargar"
+#  Raven PRO — 60 ítems (lazy), Safe Mode, UI rápida y export diferido
+#  - Abre inmediato (sin trabajo pesado al cargar)
+#  - Genera sólo el ítem actual (lazy)
+#  - Botones por opción (sin radio => sin doble clic)
+#  - Safe mode: si PIL falla, usa Plotly (SVG) y sigue funcionando
+#  - Export: “Generar” => recién ahí aparece el botón de descarga
 # ======================================================================
 
 import streamlit as st
@@ -16,7 +16,15 @@ from io import BytesIO
 from datetime import datetime
 import random
 import base64
-from PIL import Image, ImageDraw
+
+# Intentamos PIL; si falla, seguimos con Plotly (modo seguro)
+SAFE_PIL = True
+try:
+    from PIL import Image, ImageDraw
+except Exception:
+    SAFE_PIL = False
+
+import plotly.graph_objects as go
 
 # ------------------------- Config UI -----------------------------------
 st.set_page_config(
@@ -47,16 +55,19 @@ html, body, [data-testid="stAppViewContainer"]{
 hr{ border:none; border-top:1px solid #eee; margin:14px 0; }
 .badge{ display:inline-flex; align-items:center; gap:6px; padding:.25rem .55rem; font-size:.82rem; border-radius:999px; border:1px solid #eaeaea; background:#fafafa;}
 .btnrow{ display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap:8px; }
+.info-safe { background:#fff8e6; border:1px solid #ffe6b3; padding:10px 12px; border-radius:10px; font-size:.95rem; }
 </style>
 """, unsafe_allow_html=True)
 
 # ------------------------- Parámetros -----------------------------------
 N_ITEMS   = 60
 SEED      = 2025
-IMG_MTX   = (480, 480)   # matriz del ítem en pantalla
+
+# tamaños (cuando PIL está disponible)
+IMG_MTX   = (480, 480)   # matriz en pantalla
 IMG_OPT   = (120, 120)   # cada opción en pantalla
-THUMB_MTX = (320, 320)   # miniatura para export "con miniaturas"
-THUMB_OPT = (100, 100)
+THUMB_MTX = (320, 320)   # miniatura export
+THUMB_OPT = (90,  90)
 
 SHAPES = ["square","circle","triangle","pentagon"]
 
@@ -69,7 +80,7 @@ if "start_time" not in st.session_state: st.session_state.start_time=None
 if "end_time"   not in st.session_state: st.session_state.end_time=None
 if "fecha"      not in st.session_state: st.session_state.fecha=None
 
-# Para export (diferido): guardamos bytes cuando el usuario aprieta "Generar"
+# Para export (diferido)
 if "report_light"  not in st.session_state: st.session_state.report_light=None
 if "report_thumbs" not in st.session_state: st.session_state.report_thumbs=None
 
@@ -85,6 +96,7 @@ class RavenItem:
 
 def clamp(v, a, b): return max(a, min(b, v))
 
+# ------------------------- Geometría ------------------------------------
 def polygon_points(cx, cy, radius, sides, rotation_rad):
     pts=[]
     for k in range(sides):
@@ -92,18 +104,23 @@ def polygon_points(cx, cy, radius, sides, rotation_rad):
         pts.append((cx + radius*np.cos(ang), cy + radius*np.sin(ang)))
     return pts
 
-def draw_shape(d: ImageDraw.ImageDraw, shape: str, cx: int, cy: int, size_px: int, rot_rad: float, color=(17,17,17)):
+# ------------------------- Dibujo PIL (si está disponible) --------------
+def draw_shape_pil(d: "ImageDraw.ImageDraw", shape: str, cx: int, cy: int, size_px: int, rot_rad: float, color=(17,17,17)):
     if shape == "circle":
         r = size_px//2
         d.ellipse([cx-r, cy-r, cx+r, cy+r], outline=color, width=2)
     elif shape == "square":
-        d.polygon(polygon_points(cx, cy, size_px/2, 4, rot_rad), outline=color, width=2)
+        pts = polygon_points(cx, cy, size_px/2, 4, rot_rad)
+        d.polygon(pts, outline=color, width=2)
     elif shape == "triangle":
-        d.polygon(polygon_points(cx, cy, size_px/2, 3, rot_rad), outline=color, width=2)
+        pts = polygon_points(cx, cy, size_px/2, 3, rot_rad)
+        d.polygon(pts, outline=color, width=2)
     else:
-        d.polygon(polygon_points(cx, cy, size_px/2, 5, rot_rad), outline=color, width=2)
+        pts = polygon_points(cx, cy, size_px/2, 5, rot_rad)
+        d.polygon(pts, outline=color, width=2)
 
 def render_matrix_png(cells:List[Dict], size=(480,480)) -> bytes:
+    """Renderiza matriz (PIL). Retorna PNG en bytes."""
     w,h = size
     img = Image.new("RGB", (w,h), (255,255,255))
     d = ImageDraw.Draw(img)
@@ -129,7 +146,7 @@ def render_matrix_png(cells:List[Dict], size=(480,480)) -> bytes:
             continue
         shape, size_rel, rot = cell["shape"], cell["size"], cell["rot"]
         size_px = int(min(W,H) * size_rel)
-        draw_shape(d, shape, cx, cy, size_px, rot)
+        draw_shape_pil(d, shape, cx, cy, size_px, rot)
     buf = BytesIO(); img.save(buf, format="PNG", optimize=True); buf.seek(0)
     return buf.read()
 
@@ -141,9 +158,79 @@ def render_option_png(shape:str, size_rel:float, rot:float, size=(120,120)) -> b
     d.rectangle([x0,y0,x0+W,y0+H], outline=(210,210,210), width=2)
     cx, cy = w//2, h//2
     size_px = int(min(W,H) * size_rel)
-    draw_shape(d, shape, cx, cy, size_px, rot)
+    draw_shape_pil(d, shape, cx, cy, size_px, rot)
     buf = BytesIO(); img.save(buf, format="PNG", optimize=True); buf.seek(0)
     return buf.read()
+
+# ------------------------- Dibujo Plotly (safe mode) --------------------
+def shape_to_sides(shape:str)->int:
+    return {"triangle":3, "square":4, "pentagon":5}.get(shape, 0)
+
+def render_matrix_plotly(cells:List[Dict], size_px=500)->go.Figure:
+    fig = go.Figure()
+    # cuadro
+    fig.add_shape(type="rect", x0=0, y0=0, x1=3, y1=3, line=dict(color="black", width=2))
+    # grillas
+    fig.add_shape(type="line", x0=1, y0=0, x1=1, y1=3, line=dict(color="#BBBBBB"))
+    fig.add_shape(type="line", x0=2, y0=0, x1=2, y1=3, line=dict(color="#BBBBBB"))
+    fig.add_shape(type="line", x0=0, y0=1, x1=3, y1=1, line=dict(color="#BBBBBB"))
+    fig.add_shape(type="line", x0=0, y0=2, x1=3, y1=2, line=dict(color="#BBBBBB"))
+
+    # dibujar celdas
+    centers=[(0.5,0.5),(1.5,0.5),(2.5,0.5),
+             (0.5,1.5),(1.5,1.5),(2.5,1.5),
+             (0.5,2.5),(1.5,2.5),(2.5,2.5)]
+    for k, cell in enumerate(cells):
+        if k==8:
+            # "faltante": marco punteado
+            x,y = centers[k]
+            fig.add_shape(type="rect", x0=x-0.35, y0=y-0.35, x1=x+0.35, y1=y+0.35,
+                          line=dict(color="#AAAAAA", dash="dash"))
+            continue
+        shp, srel, rot = cell["shape"], cell["size"], cell["rot"]
+        sides = shape_to_sides(shp)
+        if sides==0:
+            # círculo
+            r = 0.28*srel/0.32
+            fig.add_shape(type="circle", x0=centers[k][0]-r, y0=centers[k][1]-r,
+                          x1=centers[k][0]+r, y1=centers[k][1]+r, line=dict(color="#111", width=2))
+        else:
+            # polígono
+            r = 0.28*srel/0.32
+            pts=[]
+            for i2 in range(sides):
+                ang = rot + 2*np.pi*i2/sides
+                px = centers[k][0] + r*np.cos(ang)
+                py = centers[k][1] + r*np.sin(ang)
+                pts.append((px,py))
+            xs=[p[0] for p in pts]+[pts[0][0]]; ys=[p[1] for p in pts]+[pts[0][1]]
+            fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color="#111", width=2), showlegend=False))
+    fig.update_xaxes(visible=False, range=[-0.1,3.1])
+    fig.update_yaxes(visible=False, range=[-0.1,3.1], scaleanchor="x", scaleratio=1)
+    fig.update_layout(height=size_px, margin=dict(l=10,r=10,t=10,b=10), plot_bgcolor="white")
+    return fig
+
+def render_option_plotly(shape:str, size_rel:float, rot:float, size_px=150)->go.Figure:
+    fig = go.Figure()
+    fig.add_shape(type="rect", x0=0, y0=0, x1=1, y1=1, line=dict(color="#CCCCCC"))
+    sides = shape_to_sides(shape)
+    if sides==0:
+        r=0.28*size_rel/0.32
+        fig.add_shape(type="circle", x0=0.5-r, y0=0.5-r, x1=0.5+r, y1=0.5+r, line=dict(color="#111", width=2))
+    else:
+        r=0.28*size_rel/0.32
+        pts=[]
+        for i2 in range(sides):
+            ang = rot + 2*np.pi*i2/sides
+            px = 0.5 + r*np.cos(ang)
+            py = 0.5 + r*np.sin(ang)
+            pts.append((px,py))
+        xs=[p[0] for p in pts]+[pts[0][0]]; ys=[p[1] for p in pts]+[pts[0][1]]
+        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color="#111", width=2), showlegend=False))
+    fig.update_xaxes(visible=False, range=[-0.05,1.05])
+    fig.update_yaxes(visible=False, range=[-0.05,1.05], scaleanchor="x", scaleratio=1)
+    fig.update_layout(height=size_px, margin=dict(l=10,r=10,t=10,b=10), plot_bgcolor="white")
+    return fig
 
 # ------------------------- Reglas ---------------------------------------
 def rule_rotation(seed:int):
@@ -256,6 +343,7 @@ def rule_mix(seed:int):
 
 RULES = [rule_rotation, rule_size, rule_shape, rule_mix]
 
+@st.cache_data(show_spinner=False)
 def get_item(idx:int, seed:int=SEED)->RavenItem:
     rng = random.Random(seed + idx*97)
     rule_fn = rng.choice(RULES)
@@ -304,9 +392,6 @@ def on_pick(i:int, opt:int):
     st.rerun()
 
 # ------------------------- Exporters (diferidos) ------------------------
-def _png_to_b64(png_bytes:bytes)->str:
-    return base64.b64encode(png_bytes).decode("ascii")
-
 def build_html_light(n_items:int, answers:Dict[int,int], result:Dict)->bytes:
     rows=""
     for i in range(n_items):
@@ -348,6 +433,10 @@ th,td{{border:1px solid #eee; padding:8px; text-align:left;}}
     return html.encode("utf-8")
 
 def build_html_thumbs(n_items:int, answers:Dict[int,int], result:Dict)->bytes:
+    # Si PIL no está, no podemos hacer miniaturas, devolvemos el ligero.
+    if not SAFE_PIL:
+        return build_html_light(n_items, answers, result)
+
     secs=result["secs"]; m,s=divmod(secs,60)
     parts=[f"""<!doctype html><html><head><meta charset="utf-8" />
 <title>Informe Raven (HTML con Miniaturas)</title>
@@ -414,9 +503,18 @@ def view_inicio():
     st.markdown("""
     <div class="card">
       <div class="big-title">🧩 Test Raven — Matrices Progresivas (PRO)</div>
-      <p class="small" style="margin:0;">60 ítems · imágenes generadas al vuelo (lazy) · diseño liviano y responsivo</p>
+      <p class="small" style="margin:0;">60 ítems · matriz/opciones generadas al vuelo (lazy) · diseño liviano y responsivo</p>
     </div>
     """, unsafe_allow_html=True)
+
+    if not SAFE_PIL:
+        st.markdown(
+            "<div class='info-safe'>⚠️ Modo seguro: PIL no disponible. "
+            "La app usará renderización Plotly (SVG) para la matriz y opciones. "
+            "Todo funciona igual; las exportaciones con miniaturas usarán el reporte ligero.</div>",
+            unsafe_allow_html=True,
+        )
+
     c1, c2 = st.columns([1.35,1])
     with c1:
         st.markdown(f"""
@@ -466,8 +564,12 @@ def view_test():
     # Matriz (solo del ítem actual)
     with st.container():
         st.markdown("<div class='card'>", unsafe_allow_html=True)
-        q_png = render_matrix_png(it.cells, size=IMG_MTX)
-        st.image(q_png, use_column_width=True)
+        if SAFE_PIL:
+            q_png = render_matrix_png(it.cells, size=IMG_MTX)
+            st.image(q_png, use_column_width=True)
+        else:
+            fig = render_matrix_plotly(it.cells, size_px=500)
+            st.plotly_chart(fig, use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
     # Alternativas: 8 botones (sin radio)
@@ -476,8 +578,12 @@ def view_test():
     for k, tup in enumerate(it.options):
         with cols[k%4]:
             st.markdown("<div class='choice'>", unsafe_allow_html=True)
-            op_png = render_option_png(*tup, size=IMG_OPT)
-            st.image(op_png, use_container_width=True)
+            if SAFE_PIL:
+                op_png = render_option_png(*tup, size=IMG_OPT)
+                st.image(op_png, use_container_width=True)
+            else:
+                figo = render_option_plotly(*tup, size_px=150)
+                st.plotly_chart(figo, use_container_width=True)
             st.markdown(f"<div class='num'>Opción {k+1}</div>", unsafe_allow_html=True)
             if st.button(f"Elegir opción {k+1}", key=f"pick_{i}_{k}", use_container_width=True):
                 on_pick(i, k)
@@ -555,7 +661,7 @@ def view_resultados():
 
     with c2:
         if st.button("🛠️ Generar reporte (HTML con miniaturas)", use_container_width=True):
-            with st.spinner("Generando HTML con miniaturas (puede ser pesado)…"):
+            with st.spinner("Generando HTML con miniaturas…"):
                 st.session_state.report_thumbs = build_html_thumbs(N_ITEMS, st.session_state.answers, result)
         if st.session_state.report_thumbs is not None:
             st.download_button(
@@ -565,7 +671,7 @@ def view_resultados():
                 mime="text/html",
                 use_container_width=True
             )
-            st.caption("Incluye miniaturas de cada ítem y sus 8 opciones.")
+            st.caption("Incluye miniaturas de cada ítem y sus 8 opciones (si PIL está disponible).")
 
     st.markdown("---")
     if st.button("🔄 Nueva prueba", type="primary", use_container_width=True):

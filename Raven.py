@@ -117,34 +117,24 @@ except Exception:
 
 
 def forzar_scroll_al_top():
-    """Scroll al tope inyectando <script> vía markdown para máxima compatibilidad.
-    Evita streamlit.components y usa un placeholder dinámico.
+    """Scroll al tope con HTML/JS incrustado usando triple comillas (sin f-strings).
+    Evita errores de comillas sin cerrar y funciona en Streamlit Cloud.
     """
-    script = (
-        "<script>
-"
-        "  setTimeout(function(){
-"
-        "    try {
-"
-        "      var root = window.parent || window;
-"
-        "      if (root && root.scrollTo) { root.scrollTo({top:0, behavior:'auto'}); }
-"
-        "      var c = root && root.document ? root.document.querySelector('[data-testid=\\"stAppViewContainer\\"]') : null;
-"
-        "      if (c && c.scrollTo) { c.scrollTo({top:0, behavior:'auto'}); }
-"
-        "    } catch(e) { }
-"
-        "  }, 60);
-"
-        "</script>"
-    )
-    # Placeholder para re-inyectar el script en cada paso
+    js_code = '''
+<script>
+  setTimeout(function(){
+    try {
+      var root = window.parent || window;
+      if (root && root.scrollTo) { root.scrollTo({top:0, behavior:'auto'}); }
+      var c = (root && root.document) ? root.document.querySelector('[data-testid="stAppViewContainer"]') : null;
+      if (c && c.scrollTo) { c.scrollTo({top:0, behavior:'auto'}); }
+    } catch(e) {}
+  }, 60);
+</script>
+'''
     if 'scroll_placeholder' not in st.session_state:
         st.session_state.scroll_placeholder = st.empty()
-    st.session_state.scroll_placeholder.markdown(script, unsafe_allow_html=True)
+    st.session_state.scroll_placeholder.markdown(js_code, unsafe_allow_html=True)
 
 # ----------------------------
 # GENERACIÓN DE PREGUNTAS

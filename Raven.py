@@ -1,9 +1,9 @@
 # ======================================================================
-#  Raven PRO — 60 ítems, render diferido y sin bloqueos
-#  - Lazy generation: cada ítem se construye al mostrarse
-#  - Render de imágenes al vuelo con PIL (sin cache pesado)
-#  - Auto-avance al seleccionar, sin doble click
-#  - KPIs + tabla de resultados, export HTML imprimible
+#  Raven PRO — 60 ítems, render perezoso y export con miniaturas opcional
+#  - Sin trabajo pesado al inicio (no cuelga la carga)
+#  - Imágenes generadas al vuelo con PIL, solo del ítem actual
+#  - Autoavance sin doble click
+#  - Export HTML rápido + Export HTML con miniaturas (ítem + 8 opciones)
 # ======================================================================
 
 import streamlit as st
@@ -14,11 +14,12 @@ from typing import List, Tuple, Dict
 from io import BytesIO
 from datetime import datetime
 import random
+import base64
 
-from PIL import Image, ImageDraw   # Ligero y estable en Cloud
+from PIL import Image, ImageDraw  # PIL es liviano en Streamlit Cloud
 
 # ----------------------------------------
-# Config de página
+# Config de página (primera instrucción visual)
 # ----------------------------------------
 st.set_page_config(
     page_title="Raven PRO | Matrices Progresivas",
@@ -30,10 +31,12 @@ st.set_page_config(
 # ----------------------------------------
 # Parámetros clave
 # ----------------------------------------
-N_ITEMS = 60         # ⇦ 60 ítems
-SEED    = 2025       # semilla determinística para reproducibilidad
-IMG_MTX = (500, 500) # tamaño de la matriz (suficiente nítido / rápido)
-IMG_OPT = (150, 150) # tamaño de opción
+N_ITEMS = 60          # 60 ítems
+SEED    = 2025        # semilla reproducible
+IMG_MTX = (480, 480)  # tamaño de la matriz del ítem
+IMG_OPT = (120, 120)  # tamaño de cada opción (miniatura en UI)
+THUMB_MTX = (320, 320)  # tamaño de miniatura de matriz para export con thumbs
+THUMB_OPT = (100, 100)  # tamaño de miniatura de opción para export con thumbs
 
 # ----------------------------------------
 # Estilos UI
@@ -46,10 +49,12 @@ html, body, [data-testid="stAppViewContainer"]{
   font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
 }
 .block-container{ max-width:1200px; padding-top:0.8rem; padding-bottom:2rem; }
+
 .card{
   border:1px solid #eee; border-radius:14px; background:#fff;
   box-shadow:0 2px 0 rgba(0,0,0,.03); padding:18px;
 }
+
 .big-title{
   font-size:clamp(2.1rem,4.5vw,3rem); font-weight:900; margin:.2rem 0 .6rem 0;
   animation: slideIn .3s ease-out both;
@@ -90,6 +95,8 @@ class RavenItem:
 # ----------------------------------------
 SHAPES = ["square","circle","triangle","pentagon"]
 
+def clamp(v, a, b): return max(a, min(b, v))
+
 def polygon_points(cx, cy, radius, sides, rotation_rad):
     pts=[]
     for k in range(sides):
@@ -113,20 +120,53 @@ def draw_shape(d: ImageDraw.ImageDraw, shape: str, cx: int, cy: int, size_px: in
         pts = polygon_points(cx, cy, size_px/2, 5, rot_rad)
         d.polygon(pts, outline=color, width=2)
 
-def grid_centers(w, h):
-    x0, y0, W, H = int(w*0.05), int(h*0.05), int(w*0.90), int(h*0.90)
+def render_matrix_png(cells:List[Dict], size=(480,480)) -> bytes:
+    w,h = size
+    img = Image.new("RGB", (w,h), (255,255,255))
+    d = ImageDraw.Draw(img)
+    x0,y0,W,H = int(w*0.05), int(h*0.05), int(w*0.90), int(h*0.90)
+    d.rectangle([x0,y0,x0+W,y0+H], outline=(17,17,17), width=3)
+    # líneas grilla
+    for frac in [1/3, 2/3]:
+        y = y0 + int(H*frac); x = x0 + int(W*frac)
+        d.line([x0, y, x0+W, y], fill=(190,190,190), width=1)
+        d.line([x, y0, x, y0+H], fill=(190,190,190), width=1)
+    # centros
     xs = [x0 + int(W/6), x0 + int(W/2), x0 + int(5*W/6)]
-    ys = [y0 + int(H/6), y0 + int(H/2), y0 + int(5*H/6)]
-    coords=[]
-    for r in range(3):
-        for c in range(3):
-            coords.append((xs[c], ys[r]))
-    return (x0,y0,W,H), coords
+    ys = [y0 + int(H/6), y0 + int(H/2), y0 + int(5*W/6)]
+    centers=[(xs[c], ys[r]) for r in range(3) for c in range(3)]
+    # dibujar celdas (la última es “faltante” → caja punteada)
+    for k, cell in enumerate(cells):
+        cx, cy = centers[k]
+        if k == 8:
+            dash = 8; r = int(min(W,H)*0.12)
+            for xx in range(cx-r, cx+r, dash*2):
+                d.line([xx, cy-r, min(xx+dash, cx+r), cy-r], fill=(160,160,160), width=2)
+                d.line([xx, cy+r, min(xx+dash, cx+r), cy+r], fill=(160,160,160), width=2)
+            for yy in range(cy-r, cy+r, dash*2):
+                d.line([cx-r, yy, cx-r, min(yy+dash, cy+r)], fill=(160,160,160), width=2)
+                d.line([cx+r, yy, cx+r, min(yy+dash, cy+r)], fill=(160,160,160), width=2)
+            continue
+        shape, size_rel, rot = cell["shape"], cell["size"], cell["rot"]
+        size_px = int(min(W,H) * size_rel)
+        draw_shape(d, shape, cx, cy, size_px, rot)
+    buf = BytesIO(); img.save(buf, format="PNG", optimize=True); buf.seek(0)
+    return buf.read()
 
-def clamp(v, a, b): return max(a, min(b, v))
+def render_option_png(shape:str, size_rel:float, rot:float, size=(120,120)) -> bytes:
+    w,h = size
+    img = Image.new("RGB", (w,h), (255,255,255))
+    d = ImageDraw.Draw(img)
+    x0,y0,W,H = int(w*0.05), int(h*0.05), int(w*0.90), int(h*0.90)
+    d.rectangle([x0,y0,x0+W,y0+H], outline=(210,210,210), width=2)
+    cx, cy = w//2, h//2
+    size_px = int(min(W,H) * size_rel)
+    draw_shape(d, shape, cx, cy, size_px, rot)
+    buf = BytesIO(); img.save(buf, format="PNG", optimize=True); buf.seek(0)
+    return buf.read()
 
 # ----------------------------------------
-# Reglas (ligeras)
+# Reglas (ligeras, determinísticas)
 # ----------------------------------------
 def rule_rotation(seed:int):
     rng = random.Random(seed)
@@ -182,7 +222,7 @@ def rule_size(seed:int):
         used.add(t)
         opts.append((shape, s2, 0.0))
     rng.shuffle(opts)
-    return rule, diff, cells, (correct["shape"], correct["size"], correct["rot"]), opts
+    return rule, diff, cells, (correct["shape"], correct["size"], 0.0), opts
 
 def rule_shape(seed:int):
     rng = random.Random(seed)
@@ -204,7 +244,7 @@ def rule_shape(seed:int):
             s2 = rng.choice([s for s in SHAPES if s != correct["shape"]])
         used.add((s2,0.32,0.0)); opts.append((s2, 0.32, 0.0))
     rng.shuffle(opts)
-    return rule, diff, cells, (correct["shape"], correct["size"], correct["rot"]), opts
+    return rule, diff, cells, (correct["shape"], 0.32, 0.0), opts
 
 def rule_mix(seed:int):
     rng = random.Random(seed)
@@ -236,66 +276,18 @@ def rule_mix(seed:int):
                 t=(correct["shape"],0.32,round(float(rot2)%6.283,4))
             used.add(t); opts.append((correct["shape"], 0.32, rot2))
     rng.shuffle(opts)
-    return rule, diff, cells, (correct["shape"], correct["size"], correct["rot"]), opts
+    return rule, diff, cells, (correct["shape"], 0.32, correct["rot"]), opts
 
 RULES = [rule_rotation, rule_size, rule_shape, rule_mix]
 
 # ----------------------------------------
-# Construcción perezosa de un ítem (determinístico por índice)
+# Ítem perezoso (determinístico por índice)
 # ----------------------------------------
 def get_item(idx:int, seed:int=SEED)->RavenItem:
     rng = random.Random(seed + idx*97)
     rule_fn = rng.choice(RULES)
     rule, diff, cells, correct, opts = rule_fn(seed + idx*137)
     return RavenItem(idx=idx, rule=rule, difficulty=diff, correct_tuple=correct, options=opts, cells=cells)
-
-# ----------------------------------------
-# Render de imágenes (sin cache pesado)
-# ----------------------------------------
-def render_matrix_png(cells:List[Dict], size=(500,500)) -> bytes:
-    w,h = size
-    img = Image.new("RGB", (w,h), (255,255,255))
-    d = ImageDraw.Draw(img)
-    x0,y0,W,H = int(w*0.05), int(h*0.05), int(w*0.90), int(h*0.90)
-    d.rectangle([x0,y0,x0+W,y0+H], outline=(17,17,17), width=3)
-    # líneas de la grilla
-    for frac in [1/3, 2/3]:
-        y = y0 + int(H*frac); x = x0 + int(W*frac)
-        d.line([x0, y, x0+W, y], fill=(190,190,190), width=1)
-        d.line([x, y0, x, y0+H], fill=(190,190,190), width=1)
-    # centros
-    xs = [x0 + int(W/6), x0 + int(W/2), x0 + int(5*W/6)]
-    ys = [y0 + int(H/6), y0 + int(H/2), y0 + int(5*H/6)]
-    centers=[(xs[c], ys[r]) for r in range(3) for c in range(3)]
-    # dibujar celdas (la última es faltante, dibujamos caja punteada)
-    for k, cell in enumerate(cells):
-        cx, cy = centers[k]
-        if k == 8:
-            dash = 8; r = int(min(W,H)*0.12)
-            for xx in range(cx-r, cx+r, dash*2):
-                d.line([xx, cy-r, min(xx+dash, cx+r), cy-r], fill=(160,160,160), width=2)
-                d.line([xx, cy+r, min(xx+dash, cx+r), cy+r], fill=(160,160,160), width=2)
-            for yy in range(cy-r, cy+r, dash*2):
-                d.line([cx-r, yy, cx-r, min(yy+dash, cy+r)], fill=(160,160,160), width=2)
-                d.line([cx+r, yy, cx+r, min(yy+dash, cy+r)], fill=(160,160,160), width=2)
-            continue
-        shape, size_rel, rot = cell["shape"], cell["size"], cell["rot"]
-        size_px = int(min(W,H) * size_rel)
-        draw_shape(d, shape, cx, cy, size_px, rot)
-    buf = BytesIO(); img.save(buf, format="PNG"); buf.seek(0)
-    return buf.read()
-
-def render_option_png(shape:str, size_rel:float, rot:float, size=(150,150)) -> bytes:
-    w,h = size
-    img = Image.new("RGB", (w,h), (255,255,255))
-    d = ImageDraw.Draw(img)
-    x0,y0,W,H = int(w*0.05), int(h*0.05), int(w*0.90), int(h*0.90)
-    d.rectangle([x0,y0,x0+W,y0+H], outline=(210,210,210), width=2)
-    cx, cy = w//2, h//2
-    size_px = int(min(W,H) * size_rel)
-    draw_shape(d, shape, cx, cy, size_px, rot)
-    buf = BytesIO(); img.save(buf, format="PNG"); buf.seek(0)
-    return buf.read()
 
 # ----------------------------------------
 # Estado
@@ -328,7 +320,7 @@ def compute_result(n_items:int, answers:Dict[int,int])->Dict:
         if ok: diff_stats[it.difficulty]["ok"] += 1
 
     pct = raw/n_items*100 if n_items>0 else 0.0
-    # percentil simple aproximado
+    # percentil aproximado (curva típica Raven escolar-adulta)
     if raw <= 15: perc = 10
     elif raw <= 22: perc = 20
     elif raw <= 30: perc = 35
@@ -361,7 +353,7 @@ def on_pick(i:int):
     st.session_state._needs_rerun = True
 
 # ----------------------------------------
-# Export HTML (imprimible como PDF)
+# Export HTML — versión ligera
 # ----------------------------------------
 def export_html(n_items:int, answers:Dict[int,int], result:Dict)->bytes:
     rows=""
@@ -402,6 +394,87 @@ th,td{{border:1px solid #eee; padding:8px; text-align:left;}}
 </div>
 </body></html>"""
     return html.encode("utf-8")
+
+# ----------------------------------------
+# Export HTML — versión con miniaturas (ítem + 8 opciones)
+#  Nota: Tarda más y genera archivos grandes (muchas imágenes inline).
+# ----------------------------------------
+def _png_to_b64(png_bytes:bytes)->str:
+    return base64.b64encode(png_bytes).decode("ascii")
+
+def export_html_with_thumbs(n_items:int, answers:Dict[int,int], result:Dict)->bytes:
+    secs=result["secs"]; m,s=divmod(secs,60)
+
+    # Cabecera + KPIs
+    parts=[f"""<!doctype html><html><head><meta charset="utf-8" />
+<title>Informe Raven (HTML con Miniaturas)</title>
+<style>
+body{{font-family:Inter,Arial; margin:18px; color:#111;}}
+h1{{font-size:22px; margin:0 0 6px 0;}}
+h3{{font-size:17px; margin:.8rem 0 .2rem 0;}}
+table{{border-collapse:collapse; width:100%; margin-top:8px}}
+th,td{{border:1px solid #eee; padding:8px; text-align:left; vertical-align:top;}}
+.kpi-grid{{display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; margin:10px 0 6px 0;}}
+.kpi{{border:1px solid #eee; border-radius:12px; padding:12px; background:#fff;}}
+.kpi .label{{font-size:13px; opacity:.85}} .kpi .value{{font-size:22px; font-weight:800}}
+.opts{{ display:grid; grid-template-columns: repeat(4, 1fr); gap:8px; }}
+.optbox{{ text-align:center; }}
+.optbox img{{ border:1px solid #eee; border-radius:8px; }}
+.tag{{display:inline-block; padding:.2rem .5rem; border:1px solid #eee; border-radius:999px; font-size:.78rem; background:#fafafa}}
+@media print{{ .no-print{{display:none}} }}
+</style></head><body>
+<h1>Informe Raven — Matrices Progresivas (con miniaturas)</h1>
+<p>Fecha: <b>{st.session_state.fecha}</b></p>
+<div class="kpi-grid">
+  <div class="kpi"><div class="label">Ítems correctos</div><div class="value">{result['raw']} / {n_items}</div></div>
+  <div class="kpi"><div class="label">% Acierto</div><div class="value">{result['pct']:.1f}%</div></div>
+  <div class="kpi"><div class="label">Percentil (aprox.)</div><div class="value">{result['percentil']}</div></div>
+  <div class="kpi"><div class="label">Tiempo total</div><div class="value">{m:02d}:{s:02d} min</div></div>
+</div>
+<h3>Detalle por ítem (matriz + 8 alternativas)</h3>
+<table>
+  <thead><tr><th>#</th><th>Matriz</th><th>Alternativas</th><th>Regla</th><th>Dificultad</th><th>Respuesta</th><th>Resultado</th></tr></thead>
+  <tbody>
+"""]
+
+    # Generamos miniaturas “al vuelo” (streamlined pero pesado)
+    for i in range(n_items):
+        it = get_item(i, st.session_state.seed)
+        ans = answers.get(i, None)
+        ok  = (ans is not None) and (it.options[ans]==it.correct_tuple)
+
+        # matrix thumb
+        mt_png = render_matrix_png(it.cells, size=THUMB_MTX)
+        mt_b64 = _png_to_b64(mt_png)
+        mt_img = f"<img src='data:image/png;base64,{mt_b64}' width='{THUMB_MTX[0]}'/>"
+
+        # options grid
+        opt_html = ["<div class='opts'>"]
+        for k, tup in enumerate(it.options):
+            op_png = render_option_png(*tup, size=THUMB_OPT)
+            op_b64 = _png_to_b64(op_png)
+            sel = ("<span class='tag'>Elegida</span>" if ans==k else "")
+            cor = ("<span class='tag'>Correcta</span>" if it.options[k]==it.correct_tuple else "")
+            opt_html.append(
+                f"<div class='optbox'><img src='data:image/png;base64,{op_b64}' width='{THUMB_OPT[0]}'/><div style='margin-top:4px'>Opción {k+1}<br/>{sel} {cor}</div></div>"
+            )
+        opt_html.append("</div>")
+        opts_block = "".join(opt_html)
+
+        parts.append(f"<tr><td>{i+1:02d}</td><td>{mt_img}</td><td>{opts_block}</td><td>{it.rule}</td><td>{it.difficulty}</td><td>{'Opción '+str(ans+1) if ans is not None else '—'}</td><td>{'✓' if ok else '✗'}</td></tr>")
+
+    parts.append("""
+  </tbody>
+</table>
+<div class="no-print" style="margin-top:16px;">
+  <button onclick="window.print()" style="padding:10px 14px; border:1px solid #ddd; background:#f9f9f9; border-radius:8px; cursor:pointer;">
+    Imprimir / Guardar como PDF
+  </button>
+</div>
+</body></html>""")
+
+    html = "".join(parts).encode("utf-8")
+    return html
 
 # ----------------------------------------
 # Vistas
@@ -476,7 +549,7 @@ def view_test():
             st.markdown(f"<div class='num'>Opción {k+1}</div>", unsafe_allow_html=True)
             st.markdown("</div>", unsafe_allow_html=True)
 
-    # Selección y auto-avance (sin índice por defecto para evitar selección automática)
+    # Selección y auto-avance
     prev = st.session_state.answers.get(i, None)
     st.radio(
         "Selecciona tu respuesta",
@@ -543,15 +616,31 @@ def view_resultados():
     st.dataframe(pd.DataFrame(diff_rows), use_container_width=True, hide_index=True)
 
     st.markdown("---")
-    st.subheader("📥 Exportar informe (HTML imprimible)")
-    html_bytes = export_html(N_ITEMS, st.session_state.answers, result)
-    st.download_button(
-        "⬇️ Descargar Reporte (HTML) — Imprime como PDF",
-        data=html_bytes,
-        file_name="Informe_Raven_PRO.html",
-        mime="text/html",
-        use_container_width=True
-    )
+    st.subheader("📥 Exportar informe")
+    col1, col2 = st.columns(2)
+
+    with col1:
+        html_bytes = export_html(N_ITEMS, st.session_state.answers, result)
+        st.download_button(
+            "⬇️ Descargar Reporte (HTML ligero) — Imprime como PDF",
+            data=html_bytes,
+            file_name="Informe_Raven_PRO.html",
+            mime="text/html",
+            use_container_width=True
+        )
+        st.caption("Más rápido y liviano (sin imágenes inline).")
+
+    with col2:
+        with st.spinner("Generando HTML con miniaturas (esto puede tardar y el archivo puede ser grande)…"):
+            html_thumbs = export_html_with_thumbs(N_ITEMS, st.session_state.answers, result)
+        st.download_button(
+            "⬇️ Descargar Reporte (HTML con miniaturas)",
+            data=html_thumbs,
+            file_name="Informe_Raven_PRO_con_miniaturas.html",
+            mime="text/html",
+            use_container_width=True
+        )
+        st.caption("Incluye miniaturas de cada ítem y sus 8 opciones (más pesado).")
 
     st.markdown("---")
     if st.button("🔄 Nueva prueba", type="primary", use_container_width=True):

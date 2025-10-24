@@ -1,9 +1,10 @@
-# ================================================================
-#  Raven PRO — Matrices Progresivas (rápida, robusta y responsiva)
-#  - Carga instantánea (render diferido de imágenes por ítem)
-#  - Cache de imágenes por ítem/opción
-#  - Auto-avance, métricas, PDF/HTML
-# ================================================================
+# ======================================================================
+#  Raven PRO — Matrices Progresivas (60 ítems, render diferido con PIL)
+#  - Carga rápida (sin matplotlib/reportlab)
+#  - Imágenes dibujadas al vuelo SOLO para el ítem mostrado (lazy)
+#  - Auto-avance al elegir alternativa (sin doble click)
+#  - KPIs, exactitud por regla/dificultad, exportación HTML (imprimible)
+# ======================================================================
 
 import streamlit as st
 import numpy as np
@@ -13,11 +14,14 @@ from typing import List, Tuple, Dict
 from io import BytesIO
 from datetime import datetime
 import random
-import functools
+import base64
 
-# ==========================================
-# Config
-# ==========================================
+# PIL para dibujo rápido de imágenes
+from PIL import Image, ImageDraw
+
+# ----------------------------------------
+# Config de página
+# ----------------------------------------
 st.set_page_config(
     page_title="Raven PRO | Matrices Progresivas",
     page_icon="🧩",
@@ -25,22 +29,17 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-N_ITEMS = 24   # ⇦ Cambia a 36 si quieres más largo
-SEED    = 2025
+# ----------------------------------------
+# Parámetros clave
+# ----------------------------------------
+N_ITEMS = 60              # ⇦ 60 ítems como pediste
+SEED    = 2025            # seed base (puedes cambiarlo)
+IMG_MTX = (520, 520)      # tamaño png matriz
+IMG_OPT = (160, 160)      # tamaño png alternativa
 
-# Intento usar matplotlib (para imágenes/PDF). Si no está, usamos fallback HTML.
-HAS_MPL = False
-try:
-    import matplotlib.pyplot as plt
-    from matplotlib.patches import Rectangle, Circle, RegularPolygon
-    from matplotlib.backends.backend_pdf import PdfPages
-    HAS_MPL = True
-except Exception:
-    HAS_MPL = False
-
-# ==========================================
-# Estilos
-# ==========================================
+# ----------------------------------------
+# Estilos (UI blanca, tipografía clara, tarjetas)
+# ----------------------------------------
 st.markdown("""
 <style>
 [data-testid="stSidebar"] { display:none !important; }
@@ -49,121 +48,125 @@ html, body, [data-testid="stAppViewContainer"]{
   font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
 }
 .block-container{ max-width:1200px; padding-top:0.8rem; padding-bottom:2rem; }
+
 .card{
   border:1px solid #eee; border-radius:14px; background:#fff;
-  box-shadow: 0 2px 0 rgba(0,0,0,0.03); padding:18px;
+  box-shadow:0 2px 0 rgba(0,0,0,.03); padding:18px;
 }
 .big-title{
-  font-size:clamp(2.1rem,4.5vw,3rem); font-weight:900; margin: .2rem 0 .6rem 0;
+  font-size:clamp(2.1rem,4.5vw,3rem); font-weight:900; margin:.2rem 0 .6rem 0;
   animation: slideIn .3s ease-out both;
 }
-@keyframes slideIn{ from{ transform:translateY(6px); opacity:0; } to{ transform:translateY(0); opacity:1;} }
+@keyframes slideIn{ from{ transform:translateY(6px); opacity:0;} to{ transform:translateY(0); opacity:1;} }
+
 .kpi-grid{ display:grid; grid-template-columns: repeat(auto-fit, minmax(220px,1fr)); gap:12px; margin:10px 0 6px 0;}
 .kpi{ border:1px solid #eee; border-radius:14px; background:#fff; padding:16px; position:relative; overflow:hidden;}
 .kpi .label{ font-size:.95rem; opacity:.85;}
 .kpi .value{ font-size:2rem; font-weight:900; line-height:1;}
+
 .choice{
   border:1px solid #eee; border-radius:12px; padding:10px; background:#fff; text-align:center;
 }
 .choice .num{ font-size:.85rem; opacity:.8; }
 .choice img{ border-radius:8px; border:1px solid #eee; }
-.small{ font-size:0.95rem; opacity:.9; }
+
+.small{ font-size:.95rem; opacity:.9; }
 hr{ border:none; border-top:1px solid #eee; margin:14px 0; }
+
+.badge{ display:inline-flex; align-items:center; gap:6px; padding:.25rem .55rem; font-size:.82rem; border-radius:999px; border:1px solid #eaeaea; background:#fafafa;}
 </style>
 """, unsafe_allow_html=True)
 
-# ==========================================
-# Modelo de ítem (metadatos sin imágenes)
-# ==========================================
+# ----------------------------------------
+# Modelo de ítem (solo metadatos; sin imágenes precargadas)
+# ----------------------------------------
 @dataclass
 class RavenItem:
     idx: int
     rule: str
     difficulty: str
-    correct_tuple: Tuple[str, float, float]    # (shape, size, rot) de la casilla faltante
-    options: List[Tuple[str, float, float]]    # 8 opciones como tuplas
-    meta: dict = field(default_factory=dict)
+    correct_tuple: Tuple[str, float, float]    # (shape, size, rot)
+    options: List[Tuple[str, float, float]]    # 8 opciones (shape, size, rot)
+    meta: dict = field(default_factory=dict)   # incluye celdas de la matriz para render
 
-# ==========================================
-# Utilidades de figuras (solo cuando HAS_MPL)
-# ==========================================
-if HAS_MPL:
-    def _fig_to_png(fig) -> bytes:
-        buf = BytesIO()
-        fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")  # dpi moderado
-        plt.close(fig)
-        buf.seek(0)
-        return buf.read()
-
-    def _new_figure(w=520, h=520):
-        fig = plt.figure(figsize=(w/96, h/96), dpi=96)
-        ax = fig.add_subplot(111)
-        ax.set_aspect('equal'); ax.axis('off')
-        return fig, ax
-
-    def _draw_shape(ax, shape: str, xy: Tuple[float,float], size: float, rot: float, color: str="#111"):
-        x, y = xy
-        if shape == "square":
-            s = size
-            ax.add_patch(Rectangle((x-s/2, y-s/2), s, s, angle=np.degrees(rot),
-                                   linewidth=1, edgecolor=color, facecolor='none'))
-        elif shape == "circle":
-            ax.add_patch(Circle((x, y), radius=size/2, linewidth=1, edgecolor=color, facecolor='none'))
-        elif shape == "triangle":
-            ax.add_patch(RegularPolygon((x, y), 3, radius=size/2, orientation=rot,
-                                        linewidth=1, edgecolor=color, facecolor='none'))
-        else:  # pentagon / default
-            ax.add_patch(RegularPolygon((x, y), 5, radius=size/2, orientation=rot,
-                                        linewidth=1, edgecolor=color, facecolor='none'))
-
-    def _grid_positions():
-        xs = [0.2, 0.5, 0.8]
-        ys = [0.8, 0.5, 0.2]
-        coords=[]
-        for r in range(3):
-            for c in range(3):
-                coords.append((xs[c], ys[r]))
-        return coords
-
-# ==========================================
-# Reglas (metadatos)
-# ==========================================
+# ----------------------------------------
+# Reglas y utilidades
+# ----------------------------------------
 SHAPES = ["square","circle","triangle","pentagon"]
 
-def _rot_rule(seed:int)->Tuple[str, str, List[dict], Tuple[str,float,float], List[Tuple[str,float,float]]]:
+def clamp(v, vmin, vmax): return max(vmin, min(vmax, v))
+
+def polygon_points(cx, cy, radius, sides, rotation_rad):
+    pts=[]
+    for k in range(sides):
+        ang = rotation_rad + 2*np.pi*k/sides
+        x = cx + radius*np.cos(ang)
+        y = cy + radius*np.sin(ang)
+        pts.append((x,y))
+    return pts
+
+def draw_shape_pil(draw: ImageDraw.ImageDraw, shape: str, cx: int, cy: int, size_px: int, rot_rad: float, color=(17,17,17)):
+    # tamaño es “diámetro” aprox.
+    if shape == "circle":
+        r = size_px//2
+        draw.ellipse([cx-r, cy-r, cx+r, cy+r], outline=color, width=2)
+    elif shape == "square":
+        # cuadrado rotado → usar polígono 4 lados
+        pts = polygon_points(cx, cy, size_px/2, 4, rot_rad)
+        draw.polygon(pts, outline=color, width=2)
+    elif shape == "triangle":
+        pts = polygon_points(cx, cy, size_px/2, 3, rot_rad)
+        draw.polygon(pts, outline=color, width=2)
+    else:  # pentagon
+        pts = polygon_points(cx, cy, size_px/2, 5, rot_rad)
+        draw.polygon(pts, outline=color, width=2)
+
+def grid_cell_centers(w, h):
+    # 3x3 dentro con margen 5%
+    x0, y0 = int(w*0.05), int(h*0.05)
+    W, H = int(w*0.90), int(h*0.90)
+    xs = [x0 + int(W/6), x0 + int(W/2), x0 + int(5*W/6)]
+    ys = [y0 + int(H/6), y0 + int(H/2), y0 + int(5*H/6)]
+    coords=[]
+    for r in range(3):
+        for c in range(3):
+            coords.append((xs[c], ys[r]))
+    return (x0,y0,W,H), coords
+
+# ---------- Generadores de reglas (metadatos) ----------
+def rule_rotation(seed:int):
     rng = random.Random(seed)
-    rule_name = "Rotación progresiva"; difficulty="Media"
+    rule_name = "Rotación progresiva"; diff="Media"
     shape = rng.choice(SHAPES)
     base_rot = rng.choice([0, np.pi/4, np.pi/6])
-    step_row = rng.choice([np.pi/8, np.pi/6])
-    step_col = rng.choice([np.pi/12, np.pi/8])
+    step_r = rng.choice([np.pi/8, np.pi/6])
+    step_c = rng.choice([np.pi/12, np.pi/8])
 
     cells=[]
     for r in range(3):
         for c in range(3):
-            rot = base_rot + r*step_row + c*step_col
-            cells.append({"shape":shape,"size":0.20,"rot":rot})
+            rot = base_rot + r*step_r + c*step_c
+            cells.append({"shape":shape, "size":0.32, "rot":rot})
     correct = cells[8]
-    # opciones
     opts=[(correct["shape"], correct["size"], correct["rot"])]
-    used={ (correct["shape"], round(correct["size"],3), round(float(correct["rot"])%6.283,3) ) }
+    used={ (correct["shape"], round(correct["size"],3), round(float(correct["rot"])%6.283,4)) }
     for _ in range(7):
         delta = rng.choice([-1,1])*rng.choice([np.pi/12,np.pi/10,np.pi/8])
         rot2 = correct["rot"] + delta
-        t = (shape, 0.20, round(float(rot2)%6.283,3))
+        t = (shape, 0.32, round(float(rot2)%6.283,4))
         if t in used:
             rot2 += rng.choice([np.pi/16,-np.pi/16])
-            t = (shape, 0.20, round(float(rot2)%6.283,3))
+            t = (shape, 0.32, round(float(rot2)%6.283,4))
         used.add(t)
-        opts.append((shape, 0.20, rot2))
+        opts.append((shape, 0.32, rot2))
     rng.shuffle(opts)
-    return rule_name, difficulty, cells, (correct["shape"], correct["size"], correct["rot"]), opts
+    return rule_name, diff, cells, (correct["shape"], correct["size"], correct["rot"]), opts
 
-def _size_rule(seed:int)->Tuple[str, str, List[dict], Tuple[str,float,float], List[Tuple[str,float,float]]]:
+def rule_size(seed:int):
     rng = random.Random(seed)
-    rule_name="Tamaño progresivo"; difficulty="Media"
+    rule_name="Tamaño progresivo"; diff="Media"
     shape = rng.choice(SHAPES)
-    base  = rng.choice([0.12, 0.14])
+    base  = rng.choice([0.24, 0.26, 0.28])
     drow  = rng.choice([0.02, 0.025])
     dcol  = rng.choice([0.02, 0.025])
 
@@ -171,23 +174,26 @@ def _size_rule(seed:int)->Tuple[str, str, List[dict], Tuple[str,float,float], Li
     for r in range(3):
         for c in range(3):
             size = base + r*drow + c*dcol
+            size = clamp(size, 0.18, 0.40)
             cells.append({"shape":shape,"size":size,"rot":0.0})
     correct = cells[8]
     opts=[(correct["shape"], correct["size"], 0.0)]
     used={ (correct["shape"], round(correct["size"],3), 0.0) }
     for _ in range(7):
         delta = rng.choice([-1,1])*rng.choice([0.01,0.015,0.02])
-        s2 = max(0.08, min(0.28, correct["size"]+delta))
+        s2 = clamp(correct["size"]+delta, 0.16, 0.44)
         t = (shape, round(s2,3), 0.0)
-        if t in used: s2 = max(0.08, min(0.28, s2 + rng.choice([0.005,-0.005]))); t=(shape, round(s2,3), 0.0)
+        if t in used:
+            s2 = clamp(s2 + rng.choice([0.005,-0.005]), 0.16, 0.44)
+            t=(shape, round(s2,3), 0.0)
         used.add(t)
         opts.append((shape, s2, 0.0))
     rng.shuffle(opts)
-    return rule_name, difficulty, cells, (correct["shape"], correct["size"], correct["rot"]), opts
+    return rule_name, diff, cells, (correct["shape"], correct["size"], correct["rot"]), opts
 
-def _shape_rule(seed:int)->Tuple[str, str, List[dict], Tuple[str,float,float], List[Tuple[str,float,float]]]:
+def rule_shape(seed:int):
     rng = random.Random(seed)
-    rule_name="Cambio de forma"; difficulty="Baja"
+    rule_name="Cambio de forma"; diff="Baja"
     shapes_pick = rng.sample(SHAPES, k=len(SHAPES))
     row_step = rng.choice([1,2]); col_step = rng.choice([1,3]); base_idx = rng.randint(0,3)
 
@@ -196,22 +202,22 @@ def _shape_rule(seed:int)->Tuple[str, str, List[dict], Tuple[str,float,float], L
         for c in range(3):
             idx = (base_idx + r*row_step + c*col_step) % len(SHAPES)
             shape = shapes_pick[idx]
-            cells.append({"shape":shape,"size":0.20,"rot":0.0})
+            cells.append({"shape":shape,"size":0.32,"rot":0.0})
     correct = cells[8]
-    opts=[(correct["shape"], 0.20, 0.0)]
-    used={ (correct["shape"], 0.20, 0.0) }
+    opts=[(correct["shape"], 0.32, 0.0)]
+    used={ (correct["shape"], 0.32, 0.0) }
     for _ in range(7):
         shape2 = rng.choice([s for s in SHAPES if s != correct["shape"]])
-        while (shape2, 0.20, 0.0) in used:
+        while (shape2, 0.32, 0.0) in used:
             shape2 = rng.choice([s for s in SHAPES if s != correct["shape"]])
-        used.add((shape2,0.20,0.0))
-        opts.append((shape2, 0.20, 0.0))
+        used.add((shape2,0.32,0.0))
+        opts.append((shape2, 0.32, 0.0))
     rng.shuffle(opts)
-    return rule_name, difficulty, cells, (correct["shape"], correct["size"], correct["rot"]), opts
+    return rule_name, diff, cells, (correct["shape"], correct["size"], correct["rot"]), opts
 
-def _mix_rule(seed:int)->Tuple[str, str, List[dict], Tuple[str,float,float], List[Tuple[str,float,float]]]:
+def rule_mix(seed:int):
     rng = random.Random(seed)
-    rule_name="Mezcla forma+rotación"; difficulty="Alta"
+    rule_name="Mezcla forma+rotación"; diff="Alta"
     base_idx = rng.randint(0,3); row_step = rng.choice([1,2]); col_rot_step = rng.choice([np.pi/12, np.pi/8])
 
     cells=[]
@@ -219,38 +225,38 @@ def _mix_rule(seed:int)->Tuple[str, str, List[dict], Tuple[str,float,float], Lis
         for c in range(3):
             shape = SHAPES[(base_idx + r*row_step) % len(SHAPES)]
             rot   = c*col_rot_step
-            cells.append({"shape":shape,"size":0.20,"rot":rot})
+            cells.append({"shape":shape,"size":0.32,"rot":rot})
     correct = cells[8]
-    opts=[(correct["shape"], 0.20, correct["rot"])]
-    used={ (correct["shape"], 0.20, round(float(correct["rot"])%6.283,3)) }
+    opts=[(correct["shape"], 0.32, correct["rot"])]
+    used={ (correct["shape"], 0.32, round(float(correct["rot"])%6.283,4)) }
     for _ in range(7):
         if rng.random()<0.5:
             # cambia forma
             shape2 = rng.choice([s for s in SHAPES if s != correct["shape"]])
-            t = (shape2, 0.20, round(float(correct["rot"])%6.283,3))
+            t = (shape2, 0.32, round(float(correct["rot"])%6.283,4))
             if t in used:
                 shape2 = rng.choice([s for s in SHAPES if s != correct["shape"]])
-                t = (shape2, 0.20, round(float(correct["rot"])%6.283,3))
+                t = (shape2, 0.32, round(float(correct["rot"])%6.283,4))
             used.add(t)
-            opts.append((shape2, 0.20, correct["rot"]))
+            opts.append((shape2, 0.32, correct["rot"]))
         else:
-            # cambia rot
+            # cambia rotación
             delta = rng.choice([np.pi/12, -np.pi/12, np.pi/8, -np.pi/8])
             rot2 = correct["rot"] + delta
-            t = (correct["shape"], 0.20, round(float(rot2)%6.283,3))
+            t = (correct["shape"], 0.32, round(float(rot2)%6.283,4))
             if t in used:
                 rot2 += rng.choice([np.pi/16, -np.pi/16])
-                t = (correct["shape"], 0.20, round(float(rot2)%6.283,3))
+                t = (correct["shape"], 0.32, round(float(rot2)%6.283,4))
             used.add(t)
-            opts.append((correct["shape"], 0.20, rot2))
+            opts.append((correct["shape"], 0.32, rot2))
     rng.shuffle(opts)
-    return rule_name, difficulty, cells, (correct["shape"], correct["size"], correct["rot"]), opts
+    return rule_name, diff, cells, (correct["shape"], correct["size"], correct["rot"]), opts
 
-RULE_FUNCS = [_rot_rule, _size_rule, _shape_rule, _mix_rule]
+RULE_FUNCS = [rule_rotation, rule_size, rule_shape, rule_mix]
 
-# ==========================================
-# Banco de ítems (METADATOS solamente)
-# ==========================================
+# ----------------------------------------
+# Banco de ítems (solo metadatos)
+# ----------------------------------------
 def build_item(idx:int, seed:int)->RavenItem:
     rng = random.Random(seed + idx*97)
     fn = rng.choice(RULE_FUNCS)
@@ -261,44 +267,82 @@ def build_item(idx:int, seed:int)->RavenItem:
         difficulty=diff,
         correct_tuple=correct_tuple,
         options=opts,
-        meta={"cells":cells}   # guardamos las celdas SOLO para render del ítem actual
+        meta={"cells":cells}  # solo para pintar el ítem cuando corresponda
     )
 
 @st.cache_data(show_spinner=False)
 def build_bank(seed:int, n_items:int)->List[RavenItem]:
     return [build_item(i, seed) for i in range(n_items)]
 
-# ==========================================
-# Render diferido (solo el ítem actual) + cache de imágenes
-# ==========================================
-if HAS_MPL:
-    @st.cache_data(show_spinner=False)
-    def render_matrix_png(cells:List[dict])->bytes:
-        fig, ax = _new_figure(480, 480)
-        # marco y grid
-        ax.add_patch(Rectangle((0.05,0.05), 0.90, 0.90, fill=False, ec="#111", lw=1.2))
-        for i in [1/3, 2/3]:
-            ax.plot([0.05,0.95],[0.05+i*0.90,0.05+i*0.90], color="#bbb", lw=.8)
-            ax.plot([0.05+i*0.90,0.05+i*0.90],[0.05,0.95], color="#bbb", lw=.8)
-        coords = _grid_positions()
-        for idx, cell in enumerate(cells):
-            if idx==8:  # casilla faltante
-                ax.add_patch(Rectangle((coords[idx][0]-0.12, coords[idx][1]-0.12), 0.24, 0.24,
-                                       fill=False, ec="#999", lw=2, ls="--"))
-                continue
-            _draw_shape(ax, cell["shape"], coords[idx], cell["size"], cell["rot"])
-        return _fig_to_png(fig)
+# ----------------------------------------
+# Render diferido con PIL + caché por imagen
+# ----------------------------------------
+@st.cache_data(show_spinner=False)
+def render_matrix_png_pil(cells:List[dict], size=(520,520)) -> bytes:
+    w,h = size
+    img = Image.new("RGB", (w,h), (255,255,255))
+    d = ImageDraw.Draw(img)
+    # cuadro externo
+    x0,y0,W,H = int(w*0.05), int(h*0.05), int(w*0.90), int(h*0.90)
+    d.rectangle([x0,y0,x0+W,y0+H], outline=(17,17,17), width=3)
+    # líneas grid
+    for i in [1/3, 2/3]:
+        y = y0 + int(H*i)
+        x = x0 + int(W*i)
+        d.line([x0, y, x0+W, y], fill=(190,190,190), width=1)
+        d.line([x, y0, x, y0+H], fill=(190,190,190), width=1)
+    # centros y shapes
+    (_,_,_,_), centers = grid_cell_centers(w,h)
+    for idx, cell in enumerate(cells):
+        if idx == 8:
+            # casilla faltante (cuadro punteado)
+            cx, cy = centers[idx]
+            # dibujar rectángulo punteado
+            dash = 8
+            r = int(min(W,H)*0.12)
+            # top
+            for xx in range(cx-r, cx+r, dash*2):
+                d.line([xx, cy-r, min(xx+dash, cx+r), cy-r], fill=(160,160,160), width=2)
+            # bottom
+            for xx in range(cx-r, cx+r, dash*2):
+                d.line([xx, cy+r, min(xx+dash, cx+r), cy+r], fill=(160,160,160), width=2)
+            # left
+            for yy in range(cy-r, cy+r, dash*2):
+                d.line([cx-r, yy, cx-r, min(yy+dash, cy+r)], fill=(160,160,160), width=2)
+            # right
+            for yy in range(cy-r, cy+r, dash*2):
+                d.line([cx+r, yy, cx+r, min(yy+dash, cy+r)], fill=(160,160,160), width=2)
+            continue
+        shape = cell["shape"]; size_rel = cell["size"]; rot = cell["rot"]
+        # convertir a px
+        # tamaño relativo 0..1 sobre el menor de W/H; aquí mapeamos (0.16..0.44) aprox a píxeles
+        size_px = int(min(W,H) * size_rel)
+        cx, cy = centers[idx]
+        draw_shape_pil(d, shape, cx, cy, size_px, rot)
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf.read()
 
-    @st.cache_data(show_spinner=False)
-    def render_option_png(shape:str, size:float, rot:float)->bytes:
-        fig, ax = _new_figure(160, 160)
-        ax.add_patch(Rectangle((0.05,0.05), 0.90, 0.90, fill=False, ec="#ddd", lw=1.1))
-        _draw_shape(ax, shape, (0.5,0.5), size, rot)
-        return _fig_to_png(fig)
+@st.cache_data(show_spinner=False)
+def render_option_png_pil(shape:str, size_rel:float, rot:float, size=(160,160)) -> bytes:
+    w,h = size
+    img = Image.new("RGB", (w,h), (255,255,255))
+    d = ImageDraw.Draw(img)
+    # marco leve
+    x0,y0,W,H = int(w*0.05), int(h*0.05), int(w*0.90), int(h*0.90)
+    d.rectangle([x0,y0,x0+W,y0+H], outline=(210,210,210), width=2)
+    cx, cy = w//2, h//2
+    size_px = int(min(W,H) * size_rel)
+    draw_shape_pil(d, shape, cx, cy, size_px, rot)
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf.read()
 
-# ==========================================
+# ----------------------------------------
 # Estado
-# ==========================================
+# ----------------------------------------
 if "stage" not in st.session_state: st.session_state.stage="inicio"   # inicio | test | resultados
 if "seed"  not in st.session_state: st.session_state.seed=SEED
 if "items" not in st.session_state: st.session_state.items=[]
@@ -314,9 +358,9 @@ def ensure_bank():
         st.session_state.items = build_bank(st.session_state.seed, N_ITEMS)
     st.session_state.q_idx = max(0, min(int(st.session_state.q_idx), len(st.session_state.items)-1))
 
-# ==========================================
+# ----------------------------------------
 # Scoring
-# ==========================================
+# ----------------------------------------
 def compute_result(items:List[RavenItem], answers:Dict[int,int])->Dict:
     total=len(items)
     ok_list=[]
@@ -334,12 +378,12 @@ def compute_result(items:List[RavenItem], answers:Dict[int,int])->Dict:
     raw = int(sum(ok_list)); pct = (raw/total*100 if total>0 else 0.0)
 
     # percentil simple (orientativo)
-    if raw <= 8: perc = 10
-    elif raw <= 12: perc = 20
-    elif raw <= 16: perc = 35
-    elif raw <= 19: perc = 50
-    elif raw <= 22: perc = 70
-    elif raw <= 24: perc = 85
+    if raw <= 15: perc = 10
+    elif raw <= 22: perc = 20
+    elif raw <= 30: perc = 35
+    elif raw <= 38: perc = 50
+    elif raw <= 46: perc = 70
+    elif raw <= 54: perc = 85
     else: perc = 95
 
     if st.session_state.start_time and st.session_state.end_time:
@@ -349,9 +393,9 @@ def compute_result(items:List[RavenItem], answers:Dict[int,int])->Dict:
 
     return {"raw":raw,"pct":round(pct,1),"percentil":perc,"rule_stats":rule_stats,"diff_stats":diff_stats,"secs":secs}
 
-# ==========================================
+# ----------------------------------------
 # Callbacks
-# ==========================================
+# ----------------------------------------
 def on_pick(i:int):
     choice = st.session_state.get(f"resp_{i}")
     if choice is None: return
@@ -365,98 +409,14 @@ def on_pick(i:int):
         st.session_state.fecha = st.session_state.end_time.strftime("%d/%m/%Y %H:%M")
     st.session_state._needs_rerun = True
 
-# ==========================================
-# Gráficos (MPL)
-# ==========================================
-def mpl_gauge(score:float, title:str):
-    if not HAS_MPL: return None
-    fig, ax = plt.subplots(figsize=(5.6,3.0), dpi=110, subplot_kw=dict(polar=True))
-    ax.set_theta_direction(-1); ax.set_theta_offset(np.pi)
-    ax.set_ylim(0,100); ax.set_yticklabels([]); ax.set_xticklabels([])
-    ax.bar(np.linspace(0,np.pi,100), height=[100]*100, width=np.pi/100, color="#f1f1f1", edgecolor="#f1f1f1")
-    n = int(min(max(score,0),100))
-    ax.bar(np.linspace(0,np.pi*(n/100), n), height=[100]*n, width=np.pi/100, color="#6D597A", edgecolor="#6D597A")
-    ax.text(np.pi/2, 60, f"{score:.1f}", ha="center", va="center", fontsize=20, fontweight="bold")
-    ax.set_title(title, fontsize=12)
-    fig.tight_layout()
-    return fig
-
-def mpl_bar_rules(rule_stats:Dict[str,Dict[str,int]]):
-    if not HAS_MPL: return None
-    rules = list(rule_stats.keys())
-    acc = []
-    for r in rules:
-        ok = rule_stats[r]["ok"]; tot = rule_stats[r]["tot"]
-        acc.append(ok/tot*100 if tot>0 else 0)
-    fig, ax = plt.subplots(figsize=(6.0,3.4), dpi=110)
-    y = np.arange(len(rules))
-    ax.barh(y, acc, color="#81B29A")
-    ax.set_yticks(y); ax.set_yticklabels(rules, fontsize=9)
-    ax.set_xlim(0,100); ax.set_xlabel("Exactitud (%)"); ax.set_title("Exactitud por tipo de regla")
-    for i,v in enumerate(acc): ax.text(v+1,i,f"{v:.1f}%",va="center",fontsize=8)
-    fig.tight_layout(); return fig
-
-def mpl_bar_diff(diff_stats:Dict[str,Dict[str,int]]):
-    if not HAS_MPL: return None
-    keys = list(diff_stats.keys())
-    acc=[]
-    for k in keys:
-        ok=diff_stats[k]["ok"]; tot=diff_stats[k]["tot"]
-        acc.append(ok/tot*100 if tot>0 else 0)
-    fig, ax = plt.subplots(figsize=(6.0,3.4), dpi=110)
-    ax.bar(keys, acc, color="#E07A5F")
-    ax.set_ylim(0,100); ax.set_ylabel("Exactitud (%)"); ax.set_title("Exactitud por dificultad")
-    for i,v in enumerate(acc): ax.text(i, v+1, f"{v:.1f}%", ha="center", fontsize=8)
-    fig.tight_layout(); return fig
-
-# ==========================================
-# Export
-# ==========================================
-def build_pdf(items:List[RavenItem], answers:Dict[int,int], result:Dict)->bytes:
-    if not HAS_MPL: return b""
-    buf = BytesIO()
-    with PdfPages(buf) as pdf:
-        # Portada + KPIs
-        fig = plt.figure(figsize=(8.27,11.69)); ax = fig.add_axes([0,0,1,1]); ax.axis('off')
-        ax.text(.5,.95,"Informe Raven — Matrices Progresivas (Ocupacional)", ha='center', fontsize=20, fontweight='bold')
-        ax.text(.5,.92,f"Fecha: {st.session_state.fecha}", ha='center', fontsize=11)
-        raw=result["raw"]; pct=result["pct"]; perc=result["percentil"]; secs=result["secs"]; m,s=divmod(secs,60)
-        y=.83
-        for t,v in [("Ítems correctos",f"{raw} / {len(items)}"),
-                    ("% Acierto",f"{pct:.1f}%"),
-                    ("Percentil (aprox.)",f"{perc}"),
-                    ("Tiempo total", f"{m:02d}:{s:02d} min")]:
-            ax.text(.15,y,t,fontsize=12); ax.text(.65,y,v,fontsize=14,fontweight="bold"); y-=.05
-        g = mpl_gauge(pct, "Exactitud general (0–100)")
-        if g:
-            img = BytesIO(); g.savefig(img, format="png", dpi=140, bbox_inches="tight"); plt.close(g); img.seek(0)
-            arr = plt.imread(img); ax.imshow(arr, extent=(.1,.9,.42,.72))
-        pdf.savefig(fig, bbox_inches='tight'); plt.close(fig)
-
-        f1 = mpl_bar_rules(result["rule_stats"])
-        if f1: pdf.savefig(f1, bbox_inches='tight'); plt.close(f1)
-        f2 = mpl_bar_diff(result["diff_stats"])
-        if f2: pdf.savefig(f2, bbox_inches='tight'); plt.close(f2)
-
-        # Tabla por ítem (sin miniaturas para velocidad)
-        fig3 = plt.figure(figsize=(8.27,11.69)); ax3 = fig3.add_axes([0,0,1,1]); ax3.axis('off')
-        ax3.text(.5,.95,"Resumen por ítem", ha='center', fontsize=16, fontweight='bold')
-        y0=.90
-        for i,it in enumerate(items, start=1):
-            ok = (answers.get(it.idx) is not None) and (it.options[answers[it.idx]]==it.correct_tuple)
-            mark = "✓" if ok else "✗"
-            ax3.text(.08, y0 - i*0.032, f"{i:02d}. Regla: {it.rule} | Dif.: {it.difficulty}", fontsize=10)
-            ax3.text(.75, y0 - i*0.032, mark, fontsize=12, fontweight='bold', color=("#2a9d8f" if ok else "#e76f51"))
-            if i==30:  # salto a 2da columna si fuera 36
-                y0=.90
-        pdf.savefig(fig3, bbox_inches='tight'); plt.close(fig3)
-    buf.seek(0)
-    return buf.read()
-
-def build_html(items:List[RavenItem], answers:Dict[int,int], result:Dict)->bytes:
+# ----------------------------------------
+# Export HTML (imprimible a PDF)
+# ----------------------------------------
+def export_html(items:List[RavenItem], answers:Dict[int,int], result:Dict)->bytes:
     rows=""
     for i,it in enumerate(items, start=1):
-        ok=(answers.get(it.idx) is not None) and (it.options[answers[it.idx]]==it.correct_tuple)
+        ans = answers.get(it.idx)
+        ok  = ans is not None and (it.options[ans]==it.correct_tuple)
         rows += f"<tr><td>{i:02d}</td><td>{it.rule}</td><td>{it.difficulty}</td><td>{'✓' if ok else '✗'}</td></tr>"
     secs=result["secs"]; m,s=divmod(secs,60)
     html=f"""<!doctype html><html><head><meta charset="utf-8" />
@@ -491,36 +451,36 @@ th,td{{border:1px solid #eee; padding:8px; text-align:left;}}
 </body></html>"""
     return html.encode("utf-8")
 
-# ==========================================
+# ----------------------------------------
 # Vistas
-# ==========================================
+# ----------------------------------------
 def view_inicio():
     st.markdown("""
     <div class="card">
       <div class="big-title">🧩 Test Raven — Matrices Progresivas (PRO)</div>
-      <p class="small" style="margin:0;">Carga ultra-rápida · Render de imágenes por ítem · Diseño responsivo</p>
+      <p class="small" style="margin:0;">Render de imágenes con PIL solo cuando toca (lazy) · 60 ítems · Diseño responsivo</p>
     </div>
     """, unsafe_allow_html=True)
     c1, c2 = st.columns([1.35,1])
     with c1:
-        st.markdown("""
+        st.markdown(f"""
         <div class="card">
           <h3 style="margin-top:0">¿Qué mide?</h3>
-          <p>Razonamiento fluido: detectar patrones y reglas visuales en matrices 3×3 con una casilla faltante.</p>
+          <p>Razonamiento fluido: detectar patrones/reglas visuales en matrices 3×3 con una casilla faltante.</p>
           <ul>
-            <li><b>Número de ítems:</b> {n} (cambia <code>N_ITEMS</code> si deseas 36).</li>
-            <li><b>Auto-avance:</b> al seleccionar una opción, pasas al siguiente ítem.</li>
-            <li><b>Resultados:</b> KPIs, exactitud por regla y dificultad, PDF/HTML.</li>
+            <li><b>Número de ítems:</b> {N_ITEMS}</li>
+            <li><b>Auto-avance:</b> al seleccionar una opción pasas al siguiente ítem.</li>
+            <li><b>Resultados:</b> KPIs, exactitud por regla/dificultad, tabla por ítem, exportación HTML imprimible.</li>
           </ul>
         </div>
-        """.replace("{n}", str(N_ITEMS)), unsafe_allow_html=True)
+        """, unsafe_allow_html=True)
     with c2:
         st.markdown("""
         <div class="card">
           <h3 style="margin-top:0">Recomendaciones</h3>
           <ul>
             <li>Usa navegador reciente (Chrome/Edge/Firefox).</li>
-            <li>Si ves cuadros en blanco, instala <code>matplotlib</code> en tu entorno.</li>
+            <li>Si tu conexión es lenta, espera que carguen las opciones (se dibujan al momento).</li>
           </ul>
         </div>
         """, unsafe_allow_html=True)
@@ -549,28 +509,22 @@ def view_test():
     </div>
     """, unsafe_allow_html=True)
 
-    # Matriz (render diferido y cacheado)
+    # Matriz (solo del ítem actual)
     with st.container():
         st.markdown("<div class='card'>", unsafe_allow_html=True)
-        if HAS_MPL:
-            with st.spinner("Generando figura…"):
-                q_png = render_matrix_png(it.meta["cells"])
-                st.image(q_png, use_column_width=True)
-        else:
-            st.warning("Instala matplotlib para ver las figuras. (El test sigue funcionando con opciones listadas).")
+        q_png = render_matrix_png_pil(it.meta["cells"], size=IMG_MTX)
+        st.image(q_png, use_column_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # Opciones (8) — imágenes por opción cacheadas
+    # Opciones (8) — render diferido (cada una cacheada)
     st.markdown("### Alternativas")
     cols = st.columns(4)
     for k, tup in enumerate(it.options):
         col = cols[k%4]
         with col:
             st.markdown("<div class='choice'>", unsafe_allow_html=True)
-            if HAS_MPL:
-                with st.spinner(None):
-                    op_png = render_option_png(*tup)
-                    st.image(op_png, use_column_width=True)
+            op_png = render_option_png_pil(*tup, size=IMG_OPT)
+            st.image(op_png, use_column_width=True)
             st.markdown(f"<div class='num'>Opción {k+1}</div>", unsafe_allow_html=True)
             st.markdown("</div>", unsafe_allow_html=True)
 
@@ -611,26 +565,8 @@ def view_resultados():
     st.markdown(f"<div class='kpi'><div class='label'>Tiempo total</div><div class='value'>{m:02d}:{s:02d} min</div></div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    if HAS_MPL:
-        g = mpl_gauge(result["pct"], "Exactitud general (0–100)")
-        st.pyplot(g, use_container_width=True)
-
     st.markdown("---")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("Exactitud por tipo de regla")
-        if HAS_MPL:
-            st.pyplot(mpl_bar_rules(result["rule_stats"]), use_container_width=True)
-        else:
-            st.info("Instala matplotlib para ver este gráfico.")
-    with c2:
-        st.subheader("Exactitud por dificultad")
-        if HAS_MPL:
-            st.pyplot(mpl_bar_diff(result["diff_stats"]), use_container_width=True)
-        else:
-            st.info("Instala matplotlib para ver este gráfico.")
-
-    st.markdown("---")
+    # Tabla por ítem
     st.subheader("📋 Resumen por ítem")
     rows=[]
     for i,it in enumerate(items, start=1):
@@ -645,27 +581,34 @@ def view_resultados():
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
+    # Exactitud por regla / dificultad (en texto para evitar plot pesado)
     st.markdown("---")
-    st.subheader("📥 Exportar informe")
-    if HAS_MPL:
-        pdf_bytes = build_pdf(items, st.session_state.answers, result)
-        st.download_button(
-            "⬇️ Descargar PDF",
-            data=pdf_bytes,
-            file_name="Informe_Raven_PRO.pdf",
-            mime="application/pdf",
-            use_container_width=True
-        )
-    else:
-        html_bytes = build_html(items, st.session_state.answers, result)
-        st.download_button(
-            "⬇️ Descargar Reporte (HTML) — Imprime como PDF",
-            data=html_bytes,
-            file_name="Informe_Raven_PRO.html",
-            mime="text/html",
-            use_container_width=True
-        )
-        st.caption("Para ver figuras y PDF nativo, instala matplotlib en tu entorno.")
+    st.subheader("🔎 Exactitud por tipo de regla y dificultad")
+    rule_rows=[]
+    for r,stt in result["rule_stats"].items():
+        ok, tot = stt["ok"], stt["tot"]
+        acc = ok/tot*100 if tot>0 else 0
+        rule_rows.append({"Regla": r, "Correctos": ok, "Total": tot, "Exactitud %": round(acc,1)})
+    st.dataframe(pd.DataFrame(rule_rows), use_container_width=True, hide_index=True)
+
+    diff_rows=[]
+    for d,stt in result["diff_stats"].items():
+        ok, tot = stt["ok"], stt["tot"]
+        acc = ok/tot*100 if tot>0 else 0
+        diff_rows.append({"Dificultad": d, "Correctos": ok, "Total": tot, "Exactitud %": round(acc,1)})
+    st.dataframe(pd.DataFrame(diff_rows), use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    st.subheader("📥 Exportar informe (HTML imprimible)")
+    html_bytes = export_html(items, st.session_state.answers, result)
+    st.download_button(
+        "⬇️ Descargar Reporte (HTML) — Imprime como PDF",
+        data=html_bytes,
+        file_name="Informe_Raven_PRO.html",
+        mime="text/html",
+        use_container_width=True
+    )
+    st.caption("Abre el HTML y usa “Imprimir → Guardar como PDF”. (Sin dependencias pesadas).")
 
     st.markdown("---")
     if st.button("🔄 Nueva prueba", type="primary", use_container_width=True):
@@ -678,9 +621,9 @@ def view_resultados():
         st.session_state.fecha=None
         st.rerun()
 
-# ==========================================
+# ----------------------------------------
 # Flujo principal
-# ==========================================
+# ----------------------------------------
 if st.session_state.stage == "inicio":
     view_inicio()
 elif st.session_state.stage == "test":

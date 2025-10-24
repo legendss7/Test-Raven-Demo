@@ -6,4 +6,6 @@ matplotlib
 pillow
 pymupdf
 requests
+pdf2image
+
 

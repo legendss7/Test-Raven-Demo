@@ -1,282 +1,579 @@
-# app.py
-# ------------------------------------------------------------
-# Matrices lógicas minimalistas (estilo Raven) con miniaturas
-# Requisitos: pip install streamlit pillow
-# ------------------------------------------------------------
+# test_logica_analista.py
+# ---------------------------------------------
+# App de evaluación: Test de Lógica Matemática – Analista
+# Estructura inspirada en app Big Five (inicio → test_activo → resultados)
+# - StateManager con initialize()
+# - Navegación por st.session_state.stage y flag navigation_flag
+# - Auto-avance al elegir alternativa
+# - Forzar scroll al top en cada cambio de pregunta
+# - Cronómetro y límite de tiempo
+# - Scoring y desglose por competencias con gráfico Plotly
+# - Exportación CSV
+# ---------------------------------------------
+
+from __future__ import annotations
+import time
+from datetime import timedelta
 import streamlit as st
-from PIL import Image, ImageDraw
-from io import BytesIO
-import random
-import math
-from datetime import datetime
+import plotly.express as px
+import pandas as pd
+from typing import Dict, List
+import io
 
-st.set_page_config(page_title="Matrices Lógicas Minimal", layout="wide")
+# ----------------------------
+# CONFIGURACIÓN DE PÁGINA
+# ----------------------------
+st.set_page_config(
+    page_title="Test Lógica Matemática - Analista",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-TOTAL_ITEMS = 60
-OPTIONS = list("ABCDEFGH")
+# ----------------------------
+# CONSTANTES
+# ----------------------------
+N_PREGUNTAS = 60
+TIEMPO_LIMITE_MIN = 35  # límite total del test
 
-# ------------------ GENERADOR DE ÍTEMS (PROCEDURAL) ------------------
-# Cada celda es un vector de 3 atributos:
-#  - shape: 0=círculo, 1=cuadrado, 2=triángulo
-#  - fill : 0=contorno, 1=relleno
-#  - rot  : 0, 45, 90, 135 (solo visible para triángulo)
-#
-# Regla base en cada fila: v3 = (v1 + v2) mod base (componente a componente)
-# La celda faltante es la (2,2) (fila3, col3). Se generan distractores cercanos.
-#
-CANVAS = 360           # tamaño del tablero grande
-THUMB  = 160           # tamaño de miniatura
-MARGIN = 20
-GRID   = 3
+# ----------------------------
+# UTILIDADES DE ESTILO
+# ----------------------------
+CSS_BASE = """
+<style>
+/* Títulos y tipografía limpia */
+h1, h2, h3, h4 { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial; }
 
-def _rnd(seed):
-    rnd = random.Random(seed)
-    return rnd
+/***** Contenedores *****/
+.block-container { padding-top: 1.2rem; padding-bottom: 2.5rem; }
 
-def draw_shape(draw: ImageDraw.Draw, cx, cy, size, shape, fill, rot):
-    # colores
-    fg = (0, 0, 0)
-    bg = (255, 255, 255)
-    w = max(2, size // 18)  # grosor
+/* Cartas livianas */
+.card {
+  background: #ffffff;
+  border: 1px solid #e9ecef;
+  border-radius: 14px;
+  padding: 1rem 1.2rem;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+}
 
-    x0, y0 = cx - size//2, cy - size//2
-    x1, y1 = cx + size//2, cy + size//2
+/* Botones de alternativas */
+.alt-btn {
+  width: 100%;
+  padding: 0.9rem 0.8rem;
+  border-radius: 12px;
+  border: 1px solid #dfe3e6;
+  background: #fff;
+  cursor: pointer;
+}
+.alt-btn:hover { background: #f7f9fb; }
+.alt-btn.selected { background: #ecf3ff; border-color: #74a7ff; }
 
-    if shape == 0:  # círculo
-        if fill:
-            draw.ellipse([x0, y0, x1, y1], outline=fg, fill=fg, width=w)
-        else:
-            draw.ellipse([x0, y0, x1, y1], outline=fg, width=w)
+/* Barra de progreso simple */
+.progress-wrap{width:100%;height:10px;background:#f1f3f5;border-radius:999px;overflow:hidden}
+.progress-bar{height:100%;background:#3b82f6}
 
-    elif shape == 1:  # cuadrado
-        if fill:
-            draw.rectangle([x0, y0, x1, y1], outline=fg, fill=fg, width=w)
-        else:
-            draw.rectangle([x0, y0, x1, y1], outline=fg, width=w)
+/* Tabla de resultados */
+.table-compact td, .table-compact th { padding: 0.35rem 0.5rem; font-size: 0.93rem; }
+</style>
+"""
 
-    else:  # triángulo (rot admite 0,45,90,135 => 0..3)
-        # triángulo isósceles rotado en 90° * k + 45° * m (m=0 o 1)
-        import math as _m
-        angle = [0, 45, 90, 135][rot] * _m.pi / 180.0
-        r = size * 0.52
-        pts = []
-        for j in range(3):
-            a = angle + 2 * _m.pi * j / 3
-            pts.append((cx + r * _m.cos(a), cy + r * _m.sin(a)))
-        if fill:
-            draw.polygon(pts, outline=fg, fill=fg)
-        else:
-            draw.polygon(pts, outline=fg)
+st.markdown(CSS_BASE, unsafe_allow_html=True)
 
-def render_board(cells, missing=(2, 2), size=CANVAS, show_qmark=True):
-    img = Image.new("RGB", (size, size), "white")
-    d = ImageDraw.Draw(img)
-    gap = MARGIN
-    cell = (size - 2 * gap) // GRID
-    # líneas de la grilla
-    fg = (0, 0, 0)
-    for i in range(1, GRID):
-        d.line([(gap, gap + i*cell), (size-gap, gap + i*cell)], fill=fg, width=1)
-        d.line([(gap + i*cell, gap), (gap + i*cell, size-gap)], fill=fg, width=1)
-    # borde
-    d.rectangle([gap, gap, size-gap, size-gap], outline=fg, width=1)
+# ----------------------------
+# STATE MANAGER
+# ----------------------------
+class StateManager:
+    @staticmethod
+    def initialize():
+        if 'stage' not in st.session_state:
+            st.session_state.stage = 'inicio'  # 'inicio' | 'test_activo' | 'resultados'
+        if 'navigation_flag' not in st.session_state:
+            st.session_state.navigation_flag = False
+        if 'current_index' not in st.session_state:
+            st.session_state.current_index = 0  # 0-based
+        if 'answers' not in st.session_state:
+            st.session_state.answers: Dict[str, str] = {}
+        if 'started_at' not in st.session_state:
+            st.session_state.started_at = None
+        if 'finished_at' not in st.session_state:
+            st.session_state.finished_at = None
+        if 'user_info' not in st.session_state:
+            st.session_state.user_info = {'nombre': '', 'email': ''}
+        if 'scroll_key' not in st.session_state:
+            st.session_state.scroll_key = 0
+        if 'questions' not in st.session_state:
+            st.session_state.questions = build_questions()
+        if 'time_limit_min' not in st.session_state:
+            st.session_state.time_limit_min = TIEMPO_LIMITE_MIN
 
-    # dibujar shapes
-    for r in range(GRID):
-        for c in range(GRID):
-            if (r, c) == missing:
-                if show_qmark:
-                    # signo ? minimalista
-                    cx = gap + c*cell + cell//2
-                    cy = gap + r*cell + cell//2
-                    s = int(cell*0.45)
-                    d.text((cx-8, cy-18), "?", fill=fg)
-                continue
-            shape, fill, rot = cells[r][c]
-            cx = gap + c*cell + cell//2
-            cy = gap + r*cell + cell//2
-            size_shape = int(cell*0.62)
-            draw_shape(d, cx, cy, size_shape, shape, fill, rot)
-    return img
+# ----------------------------
+# FORZAR SCROLL AL TOPE
+# ----------------------------
+from streamlit import components
 
-def vec_add(v1, v2):
-    s = ( (v1[0]+v2[0])%3, (v1[1]+v2[1])%2, (v1[2]+v2[2])%4 )
-    return s
+def forzar_scroll_al_top():
+    # HTML/JS seguro, sin f-strings con llaves que rompan sintaxis
+    js_code = """
+        <script>
+            setTimeout(function(){
+                try {
+                    var root = window.parent || window;
+                    root.scrollTo({top:0, behavior:'auto'});
+                    var mainContent = root.document.querySelector('[data-testid="stAppViewContainer"]');
+                    if (mainContent) {
+                        mainContent.scrollTo({top:0, behavior:'auto'});
+                    }
+                } catch(e) { /* noop */ }
+            }, 50);
+        </script>
+    """
+    st.session_state.scroll_key += 1
+    components.v1.html(js_code, height=0, key=f"scroll_{st.session_state.scroll_key}")
 
-def make_item(seed: int):
-    rnd = _rnd(seed)
-    # base aleatoria para las dos primeras celdas de cada fila
-    # fila 0..2, col 0..1 definidas; col2 se calcula; fila2,col2 será missing
-    cells = [[None]*3 for _ in range(3)]
-    for r in range(3):
-        for c in range(2):
-            cells[r][c] = (
-                rnd.randrange(0, 3),  # shape
-                rnd.randrange(0, 2),  # fill
-                rnd.randrange(0, 4),  # rot
-            )
-        cells[r][2] = vec_add(cells[r][0], cells[r][1])
+# ----------------------------
+# GENERACIÓN DE PREGUNTAS
+# ----------------------------
+# Cada pregunta: {id, competencia, dificultad, enunciado, alternativas[list], correcta(letter), explicacion}
 
-    # ahora aplicamos coherencia por columnas sutil:
-    # ajustar primera columna con una suma fija para dificultad
-    adj = (rnd.randrange(0,3), rnd.randrange(0,2), rnd.randrange(0,4))
-    for r in range(3):
-        cells[r][0] = vec_add(cells[r][0], adj)
-        cells[r][1] = cells[r][1]  # sin cambio
-        cells[r][2] = vec_add(cells[r][2], adj)
+COMP_Q = {
+    'series': 'Razonamiento cuantitativo',
+    'arit': 'Cálculo aplicado',
+    'tabla': 'Análisis de datos',
+    'comb': 'Lógica combinatoria',
+    'prop': 'Proporciones y razón'
+}
 
-    # respuesta correcta = valor en (2,2)
-    correct = cells[2][2]
 
-    # quitar (2,2) para el tablero con ?
-    board = [row[:] for row in cells]
-    board[2][2] = None
+def series_item(idx: int, base: int, step: int, n_alts: int = 5):
+    seq = [base + step * k for k in range(6)]
+    correcto = seq[-1] + step
+    alternativas = sorted({correcto, correcto+step, correcto-step, correcto+2*step, correcto//2 if correcto%2==0 else correcto+3})
+    alternativas = alternativas[:n_alts]
+    letras = ['A','B','C','D','E'][:len(alternativas)]
+    correcta = letras[alternativas.index(correcto)]
+    return {
+        'id': f'LM{idx}',
+        'competencia': COMP_Q['series'],
+        'dificultad': 'facil' if step <= 5 else 'media',
+        'enunciado': f"Completa la serie: {', '.join(map(str, seq))}, ¿cuál sigue?",
+        'alternativas': [str(x) for x in alternativas],
+        'correcta': correcta,
+        'explicacion': f"La serie aumenta de {step} en {step}. El siguiente es {correcto}."
+    }
 
-    # generar 7 distractores cercanos
-    def mutate(v):
-        s,f,t = v
-        choice = rnd.choice([0,1,2])
-        if choice == 0: s = (s + rnd.choice([1,2])) % 3
-        elif choice == 1: f = 1 - f
-        else: t = (t + rnd.choice([1,2])) % 4
-        return (s,f,t)
 
-    opts = [correct]
-    while len(opts) < 8:
-        cand = mutate(correct)
-        if cand not in opts:
-            opts.append(cand)
-    rnd.shuffle(opts)
-    correct_idx = opts.index(correct)
+def arit_item(idx: int, precio: int, pct: int):
+    inc = round(precio * pct/100)
+    total = precio + inc
+    alts = sorted({total, total-10, total+10, total-5, total+5})
+    letras = ['A','B','C','D','E']
+    correcta = letras[alts.index(total)]
+    return {
+        'id': f'LM{idx}',
+        'competencia': COMP_Q['arit'],
+        'dificultad': 'facil' if pct<=20 else 'media',
+        'enunciado': f"Un artículo cuesta ${precio}. Aumenta {pct}% ¿Cuál es el nuevo precio?",
+        'alternativas': [f"${a}" for a in alts],
+        'correcta': correcta,
+        'explicacion': f"{precio} x {pct}% = {inc}; {precio}+{inc} = {total}."
+    }
 
-    # render opciones en imágenes (cuadros individuales)
-    opt_imgs = []
-    opt_size = 160
-    for v in opts:
-        im = Image.new("RGB", (opt_size, opt_size), "white")
-        d = ImageDraw.Draw(im)
-        s = int(opt_size*0.65)
-        draw_shape(d, opt_size//2, opt_size//2, s, v[0], v[1], v[2])
-        d.rectangle([4,4,opt_size-4,opt_size-4], outline=(0,0,0), width=1)
-        opt_imgs.append(im)
 
-    # render tablero grande y miniatura
-    board_big = render_board(board, missing=(2,2), size=CANVAS, show_qmark=True)
-    board_thumb = board_big.copy()
-    board_thumb.thumbnail((THUMB, THUMB))
+def tabla_item(idx: int):
+    # Mini tabla implícita en texto
+    # Ventas por canal: A=120, B=150, C=90, D=140
+    datos = {'A':120,'B':150,'C':90,'D':140}
+    pregunta = "Según la tabla (A=120, B=150, C=90, D=140), ¿cuál es el promedio de ventas?"
+    prom = round(sum(datos.values())/len(datos))
+    alts = sorted({prom, prom+5, prom-5, prom+10, prom-10})
+    letras = ['A','B','C','D','E']
+    correcta = letras[alts.index(prom)]
+    return {
+        'id': f'LM{idx}',
+        'competencia': COMP_Q['tabla'],
+        'dificultad': 'media',
+        'enunciado': pregunta,
+        'alternativas': [str(a) for a in alts],
+        'correcta': correcta,
+        'explicacion': f"Promedio = (120+150+90+140)/4 = {prom}."
+    }
 
-    return board_big, board_thumb, opt_imgs, correct_idx
 
-# caches
-@st.cache_data(show_spinner=False, max_entries=256)
-def get_item_assets(idx: int):
-    # idx es 0..59; seed fijo para reproducibilidad
-    seed = 10_000 + idx
-    board_big, board_thumb, opt_imgs, correct_idx = make_item(seed)
-    # devolver bytes (para que el cache sea más liviano)
-    def to_bytes(pil_img):
-        b = BytesIO(); pil_img.save(b, format="PNG", optimize=True); return b.getvalue()
-    return to_bytes(board_big), to_bytes(board_thumb), [to_bytes(x) for x in opt_imgs], correct_idx
+def comb_item(idx: int, n: int, k: int):
+    # Combinatoria simple: de n personas, formar comités de k (sin orden): C(n,k)
+    from math import comb
+    correcto = comb(n,k)
+    alts = sorted({correcto, correcto+1, max(1,correcto-1), correcto+2, max(1,correcto-2)})
+    letras = ['A','B','C','D','E']
+    correcta = letras[alts.index(correcto)]
+    return {
+        'id': f'LM{idx}',
+        'competencia': COMP_Q['comb'],
+        'dificultad': 'media' if n<=8 else 'dificil',
+        'enunciado': f"¿Cuántos comités distintos de {k} personas pueden formarse a partir de {n} candidatos? (sin orden)",
+        'alternativas': [str(a) for a in alts],
+        'correcta': correcta,
+        'explicacion': f"Se usa C(n,k) = n!/(k!(n-k)!). Aquí C({n},{k}) = {correcto}."
+    }
 
-# ------------------ ESTADO ------------------
-if "idx" not in st.session_state: st.session_state.idx = 0
-if "resp" not in st.session_state: st.session_state.resp = {}   # {i: 0..7}
-if "score" not in st.session_state: st.session_state.score = 0
-if "start_ts" not in st.session_state: st.session_state.start_ts = datetime.now().isoformat()
 
-def goto(i: int):
-    st.session_state.idx = i
+def prop_item(idx: int, a: int, b: int, x: int):
+    # Regla de tres: a/b = x/y → y = (b*x)/a
+    from math import isclose
+    y = int(round((b*x)/a))
+    alts = sorted({y, y+1, max(1,y-1), y+2, max(1,y-2)})
+    letras = ['A','B','C','D','E']
+    correcta = letras[alts.index(y)]
+    return {
+        'id': f'LM{idx}',
+        'competencia': COMP_Q['prop'],
+        'dificultad': 'facil' if a<=10 and b<=50 else 'media',
+        'enunciado': f"Si {a} es a {b} como {x} es a ¿y?",
+        'alternativas': [str(v) for v in alts],
+        'correcta': correcta,
+        'explicacion': f"y = (b*x)/a = ({b}*{x})/{a} = {y}."
+    }
 
-def pick_option(i: int, k: int, correct_idx: int):
-    st.session_state.resp[i] = k
-    if k == correct_idx:
-        # nota: si cambia la respuesta, recalculamos al finalizar
-        pass
-    # auto-avance
-    if i < TOTAL_ITEMS-1:
-        st.session_state.idx = i+1
-        st.rerun()
+
+def build_questions() -> List[Dict]:
+    qs: List[Dict] = []
+    idx = 1
+    # 1) Series numéricas (12)
+    series_params = [(2,3),(5,4),(10,2),(3,5),(7,6),(1,7),(4,4),(8,3),(6,5),(9,4),(11,2),(12,3)]
+    for base, step in series_params:
+        qs.append(series_item(idx, base, step))
+        idx += 1
+    # 2) Aritmética aplicada (12)
+    arit_params = [(100,10),(250,15),(400,20),(120,5),(300,12),(180,18),(90,25),(220,8),(560,7),(800,9),(150,30),(360,22)]
+    for precio, pct in arit_params:
+        qs.append(arit_item(idx, precio, pct))
+        idx += 1
+    # 3) Tablas/Promedios (12 variaciones)
+    for _ in range(12):
+        qs.append(tabla_item(idx))
+        idx += 1
+    # 4) Combinatoria simple (12)
+    comb_params = [(6,2),(7,3),(8,2),(9,3),(10,2),(7,4),(8,3),(9,4),(10,3),(6,3),(8,4),(10,4)]
+    for n,k in comb_params:
+        qs.append(comb_item(idx, n, k))
+        idx += 1
+    # 5) Proporciones (12)
+    prop_params = [(2,10,5),(3,12,7),(4,20,9),(5,25,6),(6,18,7),(7,21,9),(8,24,10),(9,27,6),(10,30,7),(3,15,5),(4,16,7),(5,35,8)]
+    for a,b,x in prop_params:
+        qs.append(prop_item(idx, a, b, x))
+        idx += 1
+    # Asegura N_PREGUNTAS
+    return qs[:N_PREGUNTAS]
+
+# ----------------------------
+# CRONÓMETRO Y TIEMPO
+# ----------------------------
+
+def segundos_transcurridos() -> int:
+    if st.session_state.started_at is None:
+        return 0
+    return int(time.time() - st.session_state.started_at)
+
+
+def formatear_tiempo(seg: int) -> str:
+    return str(timedelta(seconds=seg))[:-3]  # mm:ss (o hh:mm:ss)
+
+
+def excede_limite() -> bool:
+    limite = st.session_state.time_limit_min * 60
+    return segundos_transcurridos() >= limite
+
+# ----------------------------
+# RENDER DE PROGRESO
+# ----------------------------
+
+def render_progreso():
+    total = len(st.session_state.questions)
+    idx = st.session_state.current_index + 1
+    pct = int((idx/total)*100)
+    st.markdown(
+        f"**Pregunta {idx} de {total}** — Progreso: {pct}%"
+    )
+    st.markdown(
+        f'<div class="progress-wrap"><div class="progress-bar" style="width:{pct}%"></div></div>',
+        unsafe_allow_html=True
+    )
+
+# ----------------------------
+# NAVEGACIÓN
+# ----------------------------
+
+def avanzar():
+    total = len(st.session_state.questions)
+    if st.session_state.current_index < total - 1:
+        st.session_state.current_index += 1
+        st.session_state.navigation_flag = True
     else:
-        st.session_state.view = "resultados"
+        st.session_state.stage = 'resultados'
+        st.session_state.finished_at = time.time()
+        st.session_state.navigation_flag = True
+
+
+def retroceder():
+    if st.session_state.current_index > 0:
+        st.session_state.current_index -= 1
+        st.session_state.navigation_flag = True
+
+# ----------------------------
+# SCORING
+# ----------------------------
+
+def calcular_score(answers: Dict[str,str], questions: List[Dict]):
+    total = len(questions)
+    aciertos = 0
+    por_competencia = {}
+    for q in questions:
+        comp = q['competencia']
+        por_competencia.setdefault(comp, {'aciertos':0,'total':0})
+        por_competencia[comp]['total'] += 1
+        rid = q['id']
+        if rid in answers and answers[rid] == q['correcta']:
+            aciertos += 1
+            por_competencia[comp]['aciertos'] += 1
+    errores = sum(1 for q in questions if q['id'] in answers and answers[q['id']] != q['correcta'])
+    omitidas = total - (aciertos + errores)
+    porcentaje = round(100 * aciertos / total, 1)
+    tiempo_total = 0
+    if st.session_state.started_at is not None:
+        fin = st.session_state.finished_at or time.time()
+        tiempo_total = int(fin - st.session_state.started_at)
+    return {
+        'total': total,
+        'aciertos': aciertos,
+        'errores': errores,
+        'omitidas': omitidas,
+        'porcentaje': porcentaje,
+        'por_competencia': por_competencia,
+        'tiempo_total': tiempo_total,
+    }
+
+# ----------------------------
+# VISTAS
+# ----------------------------
+
+def vista_inicio():
+    st.title("Test de Lógica Matemática – Analista")
+    st.write("""
+    Evaluación breve de razonamiento cuantitativo aplicada a un rol de Analista. 
+    Instrucciones:
+    - Selecciona una alternativa por pregunta.
+    - Avanza automáticamente al elegir (puedes usar Anterior/Siguiente).
+    - Tiempo límite: **{} minutos**.
+    - Al finalizar verás tu resumen y podrás descargar un CSV con tus respuestas.
+    """.format(st.session_state.time_limit_min))
+
+    with st.container():
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.session_state.user_info['nombre'] = st.text_input("Nombre (opcional)", value=st.session_state.user_info.get('nombre',''))
+        with col2:
+            st.session_state.user_info['email'] = st.text_input("Email (opcional)", value=st.session_state.user_info.get('email',''))
+
+        st.markdown("---")
+        c1, c2 = st.columns([1,1])
+        with c1:
+            if st.button("Comenzar Test", type="primary"):
+                st.session_state.answers = {}
+                st.session_state.current_index = 0
+                st.session_state.started_at = time.time()
+                st.session_state.finished_at = None
+                st.session_state.stage = 'test_activo'
+                st.session_state.navigation_flag = True
+        with c2:
+            if st.session_state.answers:
+                if st.button("Continuar donde quedé"):
+                    st.session_state.stage = 'test_activo'
+                    st.session_state.navigation_flag = True
+        st.markdown('</div>', unsafe_allow_html=True)
+
+
+
+def render_pregunta(q: Dict):
+    # Progreso + Cronómetro
+    render_progreso()
+    trans = segundos_transcurridos()
+    limite_seg = st.session_state.time_limit_min * 60
+    restante = max(0, limite_seg - trans)
+    st.caption(f"Tiempo transcurrido: {formatear_tiempo(trans)}  ·  Restante: {formatear_tiempo(restante)}")
+
+    if excede_limite():
+        st.warning("Se alcanzó el tiempo límite. Pasando a resultados…")
+        st.session_state.stage = 'resultados'
+        st.session_state.finished_at = time.time()
+        st.session_state.navigation_flag = True
+        return
+
+    # Card de pregunta
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.subheader(q['id'] + "  ·  " + q['competencia'])
+    st.write(f"**Dificultad:** {q['dificultad'].title()}")
+    st.markdown("---")
+    st.write(q['enunciado'])
+    st.markdown("---")
+
+    # Alternativas como botones para auto-avance
+    alternativas = q['alternativas']
+    letras = ['A','B','C','D','E'][:len(alternativas)]
+    current_sel = st.session_state.answers.get(q['id'])  # letra seleccionada si existe
+
+    cols = st.columns(len(alternativas)) if len(alternativas) <= 5 else st.columns(5)
+    def click_choice(letter: str):
+        st.session_state.answers[q['id']] = letter
+        forzar_scroll_al_top()
+        avanzar()
+
+    for i, letra in enumerate(letras):
+        label = f"{letra}"
+        body = alternativas[i]
+        is_sel = (current_sel == letra)
+        with cols[i % len(cols)]:
+            if st.button(label, key=f"btn_{q['id']}_{letra}"):
+                click_choice(letra)
+            st.write(body)
+            if is_sel:
+                st.caption("Seleccionada")
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    c1, c2 = st.columns([1,1])
+    with c1:
+        if st.button("⟵ Anterior", use_container_width=True):
+            forzar_scroll_al_top()
+            retroceder()
+    with c2:
+        if st.button("Siguiente ⟶", use_container_width=True):
+            forzar_scroll_al_top()
+            avanzar()
+
+
+
+def vista_test_activo():
+    total = len(st.session_state.questions)
+    idx = st.session_state.current_index
+    q = st.session_state.questions[idx]
+    forzar_scroll_al_top()
+    render_pregunta(q)
+
+
+
+def vista_resultados():
+    st.title("Resultados del Test")
+    resultados = calcular_score(st.session_state.answers, st.session_state.questions)
+
+    colA, colB, colC, colD = st.columns(4)
+    colA.metric("Aciertos", resultados['aciertos'])
+    colB.metric("Errores", resultados['errores'])
+    colC.metric("Omitidas", resultados['omitidas'])
+    colD.metric("Puntaje %", resultados['porcentaje'])
+
+    st.markdown("---")
+    st.subheader("Desglose por competencia")
+    comp_rows = []
+    for comp, vals in resultados['por_competencia'].items():
+        tasa = round(100*vals['aciertos']/vals['total'],1)
+        comp_rows.append({'competencia': comp, 'aciertos': vals['aciertos'], 'total': vals['total'], '% acierto': tasa})
+    df_comp = pd.DataFrame(comp_rows)
+    st.dataframe(df_comp, use_container_width=True)
+    if not df_comp.empty:
+        fig = px.bar(df_comp, x='competencia', y='% acierto', title='Tasa de acierto por competencia')
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("---")
+    st.subheader("Detalle de respuestas")
+    detalle = []
+    for q in st.session_state.questions:
+        rid = q['id']
+        sel = st.session_state.answers.get(rid, '')
+        ok = (sel == q['correcta']) if sel else False
+        detalle.append({
+            'id': rid,
+            'competencia': q['competencia'],
+            'dificultad': q['dificultad'],
+            'respuesta_usuario': sel or '—',
+            'respuesta_correcta': q['correcta'],
+            'acierto': 1 if ok else 0,
+            'explicacion': q['explicacion']
+        })
+    df_det = pd.DataFrame(detalle)
+    st.dataframe(df_det.drop(columns=['explicacion']), use_container_width=True)
+
+    # Exportar CSV (incluye explicación para revisión)
+    csv_buf = io.StringIO()
+    df_det.to_csv(csv_buf, index=False)
+    st.download_button("Descargar resultados (CSV)", data=csv_buf.getvalue(), file_name="resultados_test_logica.csv", mime="text/csv")
+
+    # Recomendación simple
+    st.markdown("---")
+    st.subheader("Recomendaciones")
+    if resultados['porcentaje'] >= 80:
+        st.success("Desempeño sobresaliente. Recomendado para tareas analíticas complejas y toma de decisiones cuantitativas.")
+    elif resultados['porcentaje'] >= 60:
+        st.info("Buen desempeño. Recomendable con refuerzo en áreas específicas identificadas en el desglose.")
+    else:
+        st.warning("Desempeño por debajo del esperado. Sugerido entrenamiento focalizado en fundamentos de cálculo y análisis de datos.")
+
+    st.markdown("---")
+    c1, c2 = st.columns([1,1])
+    with c1:
+        if st.button("Volver al inicio", use_container_width=True):
+            st.session_state.stage = 'inicio'
+            st.session_state.navigation_flag = True
+    with c2:
+        if st.button("Reiniciar test", use_container_width=True):
+            st.session_state.answers = {}
+            st.session_state.current_index = 0
+            st.session_state.started_at = time.time()
+            st.session_state.finished_at = None
+            st.session_state.stage = 'test_activo'
+            st.session_state.navigation_flag = True
+
+
+# ----------------------------
+# MAIN
+# ----------------------------
+
+def main():
+    StateManager.initialize()
+
+    # Manejo de navegación centralizada
+    if st.session_state.navigation_flag:
+        st.session_state.navigation_flag = False
         st.rerun()
 
-# ------------------ UI MINIMAL ------------------
-if "view" not in st.session_state: st.session_state.view = "test"
+    # Sidebar con info del test
+    with st.sidebar:
+        st.header("Configuración")
+        st.write(f"Preguntas: {len(st.session_state.questions)}")
+        st.write(f"Tiempo límite: {st.session_state.time_limit_min} min")
+        if st.session_state.started_at:
+            st.caption(f"Transcurrido: {formatear_tiempo(segundos_transcurridos())}")
+        st.markdown("---")
+        st.caption("Test de Lógica Matemática – Analista · Demo educativa")
 
-# barra superior: miniaturas clicables (muy sobrio)
-with st.container():
-    cols = st.columns(6, gap="small")
-    for i in range(TOTAL_ITEMS):
-        big, thumb, _, _ = get_item_assets(i)
-        with cols[i % 6]:
-            st.image(thumb, use_container_width=True, caption=str(i+1))
-            st.button(f"{i+1}", key=f"goto_{i}", on_click=goto, args=(i,))
+    if st.session_state.stage == 'inicio':
+        vista_inicio()
+    elif st.session_state.stage == 'test_activo':
+        vista_test_activo()
+    elif st.session_state.stage == 'resultados':
+        vista_resultados()
 
-st.divider()
+    # Footer
+    st.markdown("---")
+    st.markdown(
+        """
+        <p style='text-align:center; font-size: 12px; color: grey;'>
+        🧠 Test Lógica Matemática – Analista (Demo) · Los resultados son orientativos y no constituyen diagnóstico oficial.<br>
+        © 2025 – Desarrollado en Streamlit | Arquitectura modular profesional
+        </p>
+        """,
+        unsafe_allow_html=True
+    )
 
-if st.session_state.view == "test":
-    i = st.session_state.idx
-    big, _, opt_imgs, correct_idx = get_item_assets(i)
 
-    # panel principal: tablero + opciones A–H
-    left, right = st.columns([2, 3], gap="large")
-    with left:
-        st.markdown(f"**Ítem {i+1}/{TOTAL_ITEMS}**")
-        st.image(big, use_container_width=True)
-
-    with right:
-        st.markdown("**Elige la alternativa que completa la matriz**")
-        # mostrar opciones en grilla minimal (4x2)
-        rows = 4; cols = 2
-        k = 0
-        for r in range(rows):
-            cs = st.columns(cols, gap="small")
-            for c in range(cols):
-                if k >= 8: break
-                with cs[c]:
-                    st.image(opt_imgs[k], use_container_width=True, caption=OPTIONS[k])
-                    st.button(f"Elegir {OPTIONS[k]}",
-                              key=f"pick_{i}_{k}",
-                              on_click=pick_option,
-                              args=(i, k, correct_idx))
-                k += 1
-
-        # marca de lo ya respondido
-        if i in st.session_state.resp:
-            st.caption(f"Seleccionaste: **{OPTIONS[st.session_state.resp[i]]}**")
-        else:
-            st.caption("Selecciona una opción para continuar →")
-
-        # botón finalizar visible sólo al final
-        if i == TOTAL_ITEMS-1:
-            if st.button("Finalizar", type="primary"):
-                st.session_state.view = "resultados"
-                st.rerun()
-
-elif st.session_state.view == "resultados":
-    # recomputar score
-    correct = 0
-    data = []
-    for i in range(TOTAL_ITEMS):
-        _, _, _, correct_idx = get_item_assets(i)
-        sel = st.session_state.resp.get(i, None)
-        ok = (sel == correct_idx)
-        correct += int(ok)
-        data.append({"item": i+1, "respuesta": OPTIONS[sel] if sel is not None else None,
-                     "correcta": OPTIONS[correct_idx], "acierto": ok})
-
-    st.markdown("### Resultado")
-    st.metric("Aciertos", f"{correct} / {TOTAL_ITEMS}")
-    st.dataframe(data, use_container_width=True, hide_index=True)
-
-    # exportar CSV
-    import pandas as pd
-    df = pd.DataFrame(data)
-    csv = df.to_csv(index=False).encode("utf-8")
-    st.download_button("Descargar CSV", data=csv,
-                       file_name=f"matrices_minimal_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                       mime="text/csv")
-
-    if st.button("Reiniciar"):
-        st.session_state.clear()
-        st.rerun()
+if __name__ == "__main__":
+    main()

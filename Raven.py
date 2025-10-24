@@ -121,15 +121,24 @@ def forzar_scroll_al_top():
     Evita streamlit.components y usa un placeholder dinámico.
     """
     script = (
-        "<script>\n"
-        "  setTimeout(function(){\n"
-        "    try {\n"
-        "      var root = window.parent || window;\n"
-        "      if (root && root.scrollTo) { root.scrollTo({top:0, behavior:'auto'}); }\n"
-        "      var c = root && root.document ? root.document.querySelector('[data-testid=\\\"stAppViewContainer\\\"]') : null;\n"
-        "      if (c && c.scrollTo) { c.scrollTo({top:0, behavior:'auto'}); }\n"
-        "    } catch(e) { }\n"
-        "  }, 60);\n"
+        "<script>
+"
+        "  setTimeout(function(){
+"
+        "    try {
+"
+        "      var root = window.parent || window;
+"
+        "      if (root && root.scrollTo) { root.scrollTo({top:0, behavior:'auto'}); }
+"
+        "      var c = root && root.document ? root.document.querySelector('[data-testid=\\"stAppViewContainer\\"]') : null;
+"
+        "      if (c && c.scrollTo) { c.scrollTo({top:0, behavior:'auto'}); }
+"
+        "    } catch(e) { }
+"
+        "  }, 60);
+"
         "</script>"
     )
     # Placeholder para re-inyectar el script en cada paso
@@ -401,7 +410,7 @@ def vista_inicio():
 
 
 
-def render_pregunta(q: Dict):
+def render_pregunta_old(q: Dict):
     # Progreso + Cronómetro
     render_progreso()
     trans = segundos_transcurridos()
@@ -458,6 +467,78 @@ def render_pregunta(q: Dict):
             forzar_scroll_al_top()
             avanzar()
 
+
+
+def render_pregunta(q: Dict):
+    """Render de una pregunta con **estructura visual igual** al Big Five:
+    - Encabezado compacto (competencia + dificultad)
+    - Enunciado
+    - Selector tipo `st.radio` (como el Likert del Big Five) con autoavance
+    - Progreso y cronómetro arriba
+    - Botonera inferior igual (Anterior / Siguiente)
+    """
+    # Progreso + Cronómetro (mismo bloque superior que Big Five)
+    render_progreso()
+    trans = segundos_transcurridos()
+    limite_seg = st.session_state.time_limit_min * 60
+    restante = max(0, limite_seg - trans)
+    st.caption(f"Tiempo transcurrido: {formatear_tiempo(trans)}  ·  Restante: {formatear_tiempo(restante)}")
+
+    if excede_limite():
+        st.warning("Se alcanzó el tiempo límite. Pasando a resultados…")
+        st.session_state.stage = 'resultados'
+        st.session_state.finished_at = time.time()
+        st.session_state.navigation_flag = True
+        return
+
+    # Card principal (idéntica estructura visual)
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.subheader(q['id'] + "  ·  " + q['competencia'])
+    st.write(f"**Dificultad:** {q['dificultad'].title()}")
+    st.markdown("---")
+    st.write(q['enunciado'])
+    st.markdown("---")
+
+    # === Selector estilo Big Five (radio) ===
+    alternativas = q['alternativas']
+    letras = ['A','B','C','D','E'][:len(alternativas)]
+    opciones_radio = [f"{letras[i]}: {alternativas[i]}" for i in range(len(alternativas))]
+
+    # Selección previa
+    prev_letra = st.session_state.answers.get(q['id'])
+    if prev_letra in letras:
+        default_index = letras.index(prev_letra)
+    else:
+        default_index = None
+
+    def _on_change():
+        value = st.session_state.get(f"radio_{q['id']}")
+        sel_letter = value.split(":",1)[0].strip() if isinstance(value, str) else None
+        if sel_letter:
+            st.session_state.answers[q['id']] = sel_letter
+            forzar_scroll_al_top()
+            avanzar()
+
+    st.radio(
+        label="Selecciona una alternativa",
+        options=opciones_radio,
+        index=default_index,
+        key=f"radio_{q['id']}",
+        on_change=_on_change,
+    )
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # Botonera inferior igual al Big Five
+    c1, c2 = st.columns([1,1])
+    with c1:
+        if st.button("⟵ Anterior", use_container_width=True):
+            forzar_scroll_al_top()
+            retroceder()
+    with c2:
+        if st.button("Siguiente ⟶", use_container_width=True):
+            forzar_scroll_al_top()
+            avanzar()
 
 
 def vista_test_activo():

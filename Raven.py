@@ -108,26 +108,34 @@ class StateManager:
 # ----------------------------
 # FORZAR SCROLL AL TOPE
 # ----------------------------
-from streamlit import components
+try:
+    # Streamlit >=1.32 suele exponer components.v1.html como import directo
+    from streamlit.components.v1 import html as _comp_html
+except Exception:
+    from streamlit import components as _components
+    _comp_html = _components.v1.html
+
 
 def forzar_scroll_al_top():
-    # HTML/JS seguro, sin f-strings con llaves que rompan sintaxis
-    js_code = """
-        <script>
-            setTimeout(function(){
-                try {
-                    var root = window.parent || window;
-                    root.scrollTo({top:0, behavior:'auto'});
-                    var mainContent = root.document.querySelector('[data-testid="stAppViewContainer"]');
-                    if (mainContent) {
-                        mainContent.scrollTo({top:0, behavior:'auto'});
-                    }
-                } catch(e) { /* noop */ }
-            }, 50);
-        </script>
+    """Forza scroll al tope de manera segura y compatible.
+    - Evita f-strings dentro del JS para no chocar con llaves.
+    - Usa key incremental para ejecutar el script cada vez.
+    - height=1 (algunos entornos no aceptan 0).
     """
+    js_code = (
+        "<script>\n"
+        "  setTimeout(function(){\n"
+        "    try {\n"
+        "      var root = window.parent || window;\n"
+        "      if (root && root.scrollTo) { root.scrollTo({top:0, behavior:'auto'}); }\n"
+        "      var c = root && root.document ? root.document.querySelector('[data-testid=\\\"stAppViewContainer\\\"]') : null;\n"
+        "      if (c && c.scrollTo) { c.scrollTo({top:0, behavior:'auto'}); }\n"
+        "    } catch(e) { }\n"
+        "  }, 60);\n"
+        "</script>"
+    )
     st.session_state.scroll_key += 1
-    components.v1.html(js_code, height=0, key=f"scroll_{st.session_state.scroll_key}")
+    _comp_html(js_code, height=1, key=f"scroll_{st.session_state.scroll_key}")
 
 # ----------------------------
 # GENERACIÓN DE PREGUNTAS

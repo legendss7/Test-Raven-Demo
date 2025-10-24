@@ -117,12 +117,10 @@ except Exception:
 
 
 def forzar_scroll_al_top():
-    """Forza scroll al tope de manera segura y compatible.
-    - Evita f-strings dentro del JS para no chocar con llaves.
-    - Usa key incremental para ejecutar el script cada vez.
-    - height=1 (algunos entornos no aceptan 0).
+    """Scroll al tope inyectando <script> vía markdown para máxima compatibilidad.
+    Evita streamlit.components y usa un placeholder dinámico.
     """
-    js_code = (
+    script = (
         "<script>\n"
         "  setTimeout(function(){\n"
         "    try {\n"
@@ -134,8 +132,10 @@ def forzar_scroll_al_top():
         "  }, 60);\n"
         "</script>"
     )
-    st.session_state.scroll_key += 1
-    _comp_html(js_code, height=1, key=f"scroll_{st.session_state.scroll_key}")
+    # Placeholder para re-inyectar el script en cada paso
+    if 'scroll_placeholder' not in st.session_state:
+        st.session_state.scroll_placeholder = st.empty()
+    st.session_state.scroll_placeholder.markdown(script, unsafe_allow_html=True)
 
 # ----------------------------
 # GENERACIÓN DE PREGUNTAS

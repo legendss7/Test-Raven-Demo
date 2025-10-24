@@ -1,10 +1,10 @@
 # ======================================================================
-#  Raven PRO — 60 ítems (lazy), Safe Mode, UI rápida y export diferido
-#  - Abre inmediato (sin trabajo pesado al cargar)
-#  - Genera sólo el ítem actual (lazy)
-#  - Botones por opción (sin radio => sin doble clic)
-#  - Safe mode: si PIL falla, usa Plotly (SVG) y sigue funcionando
-#  - Export: “Generar” => recién ahí aparece el botón de descarga
+#  Raven PRO — 60 ítems (estructura Big Five)
+#  - Mismo layout/UX que la app Big Five funcionando
+#  - Imágenes "lazy": sólo del ítem actual (sin cargas pesadas iniciales)
+#  - Sin doble clic: botones por alternativa con auto-avance
+#  - Safe mode si Pillow no está: fallback a Plotly
+#  - Export: HTML ligero y HTML con miniaturas (si PIL disponible)
 # ======================================================================
 
 import streamlit as st
@@ -17,16 +17,18 @@ from datetime import datetime
 import random
 import base64
 
-# Intentamos PIL; si falla, seguimos con Plotly (modo seguro)
-SAFE_PIL = True
+# --- Intento de PIL; si falla, nos quedamos en modo seguro (Plotly) ---
+HAS_PIL = True
 try:
     from PIL import Image, ImageDraw
 except Exception:
-    SAFE_PIL = False
+    HAS_PIL = False
 
 import plotly.graph_objects as go
 
-# ------------------------- Config UI -----------------------------------
+# ----------------------------------------------------------------------
+# Config general y estilos (clonados de la app Big Five)
+# ----------------------------------------------------------------------
 st.set_page_config(
     page_title="Raven PRO | Matrices Progresivas",
     page_icon="🧩",
@@ -36,55 +38,98 @@ st.set_page_config(
 
 st.markdown("""
 <style>
+/* Oculta sidebar */
 [data-testid="stSidebar"] { display:none !important; }
+
+/* Base visual */
 html, body, [data-testid="stAppViewContainer"]{
-  background:#fff !important; color:#111 !important;
+  background:#ffffff !important; color:#111 !important;
   font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
 }
 .block-container{ max-width:1200px; padding-top:0.8rem; padding-bottom:2rem; }
-.card{ border:1px solid #eee; border-radius:14px; background:#fff; box-shadow:0 2px 0 rgba(0,0,0,.03); padding:18px; }
-.big-title{ font-size:clamp(2.1rem,4.5vw,3rem); font-weight:900; margin:.2rem 0 .6rem 0; animation: slideIn .3s ease-out both; }
-@keyframes slideIn{ from{ transform:translateY(6px); opacity:0;} to{ transform:translateY(0); opacity:1;} }
-.kpi-grid{ display:grid; grid-template-columns: repeat(auto-fit, minmax(220px,1fr)); gap:12px; margin:10px 0 6px 0;}
-.kpi{ border:1px solid #eee; border-radius:14px; background:#fff; padding:16px; position:relative; overflow:hidden;}
-.kpi .label{ font-size:.95rem; opacity:.85;} .kpi .value{ font-size:2rem; font-weight:900; line-height:1;}
+
+/* Tarjetas */
+.card{
+  border:1px solid #eee; border-radius:14px; background:#fff;
+  box-shadow: 0 2px 0 rgba(0,0,0,0.03); padding:18px;
+}
+
+/* Título grande animado */
+.big-title{
+  font-size:clamp(2.2rem, 5vw, 3.2rem);
+  font-weight:900; letter-spacing:.2px; line-height:1.12;
+  margin:.2rem 0 .6rem 0;
+  animation: slideIn .3s ease-out both;
+}
+@keyframes slideIn{
+  from{ transform: translateY(6px); opacity:0; }
+  to{ transform: translateY(0); opacity:1; }
+}
+
+/* KPIs */
+.kpi-grid{
+  display:grid; grid-template-columns: repeat(auto-fit, minmax(220px,1fr));
+  gap:12px; margin:10px 0 6px 0;
+}
+.kpi{ border:1px solid #eee; border-radius:14px; background:#fff; padding:16px; position:relative; overflow:hidden; }
+.kpi .label{ font-size:.95rem; opacity:.85; }
+.kpi .value{ font-size:2rem; font-weight:900; line-height:1; }
+
+/* Opción visual */
 .choice{ border:1px solid #eee; border-radius:12px; padding:10px; background:#fff; text-align:center; }
 .choice .num{ font-size:.85rem; opacity:.8; }
 .choice img{ border-radius:8px; border:1px solid #eee; }
+
+/* Pequeños */
 .small{ font-size:.95rem; opacity:.9; }
-hr{ border:none; border-top:1px solid #eee; margin:14px 0; }
-.badge{ display:inline-flex; align-items:center; gap:6px; padding:.25rem .55rem; font-size:.82rem; border-radius:999px; border:1px solid #eaeaea; background:#fafafa;}
-.btnrow{ display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap:8px; }
+hr{ border:none; border-top:1px solid #eee; margin:16px 0; }
+.badge{
+  display:inline-flex; align-items:center; gap:6px; padding:.25rem .55rem; font-size:.82rem;
+  border-radius:999px; border:1px solid #eaeaea; background:#fafafa;
+}
 .info-safe { background:#fff8e6; border:1px solid #ffe6b3; padding:10px 12px; border-radius:10px; font-size:.95rem; }
+
+/* Botones anchos */
+button[kind="primary"], button[kind="secondary"]{ width:100%; }
+
+/* Grilla de botones de alternativas */
+.btnrow{ display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap:8px; }
+
+/* Dataframe más legible */
+[data-testid="stDataFrame"] div[role="grid"]{ font-size:0.95rem; }
 </style>
 """, unsafe_allow_html=True)
 
-# ------------------------- Parámetros -----------------------------------
-N_ITEMS   = 60
-SEED      = 2025
+# ----------------------------------------------------------------------
+# Parámetros y estado
+# ----------------------------------------------------------------------
+N_ITEMS = 60
+SEED    = 2025
 
-# tamaños (cuando PIL está disponible)
+# Tamaños (PIL)
 IMG_MTX   = (480, 480)   # matriz en pantalla
-IMG_OPT   = (120, 120)   # cada opción en pantalla
-THUMB_MTX = (320, 320)   # miniatura export
+IMG_OPT   = (120, 120)   # cada alternativa en pantalla
+THUMB_MTX = (320, 320)   # miniaturas export
 THUMB_OPT = (90,  90)
 
 SHAPES = ["square","circle","triangle","pentagon"]
 
-# ------------------------- Estado ---------------------------------------
+# Estado principal (igual estructura Big Five)
 if "stage" not in st.session_state: st.session_state.stage="inicio"  # inicio | test | resultados
 if "seed"  not in st.session_state: st.session_state.seed=SEED
 if "q_idx" not in st.session_state: st.session_state.q_idx=0
-if "answers" not in st.session_state: st.session_state.answers={}  # idx -> 0..7
+if "answers" not in st.session_state: st.session_state.answers={}     # idx -> opción (0..7)
 if "start_time" not in st.session_state: st.session_state.start_time=None
 if "end_time"   not in st.session_state: st.session_state.end_time=None
 if "fecha"      not in st.session_state: st.session_state.fecha=None
 
-# Para export (diferido)
+# Export diferido
 if "report_light"  not in st.session_state: st.session_state.report_light=None
 if "report_thumbs" not in st.session_state: st.session_state.report_thumbs=None
 
-# ------------------------- Modelo de ítem --------------------------------
+# ----------------------------------------------------------------------
+# Modelo de item Raven
+# ----------------------------------------------------------------------
 @dataclass
 class RavenItem:
     idx: int
@@ -96,7 +141,9 @@ class RavenItem:
 
 def clamp(v, a, b): return max(a, min(b, v))
 
-# ------------------------- Geometría ------------------------------------
+# ----------------------------------------------------------------------
+# Geometría y render
+# ----------------------------------------------------------------------
 def polygon_points(cx, cy, radius, sides, rotation_rad):
     pts=[]
     for k in range(sides):
@@ -104,7 +151,10 @@ def polygon_points(cx, cy, radius, sides, rotation_rad):
         pts.append((cx + radius*np.cos(ang), cy + radius*np.sin(ang)))
     return pts
 
-# ------------------------- Dibujo PIL (si está disponible) --------------
+def shape_to_sides(shape:str)->int:
+    return {"triangle":3, "square":4, "pentagon":5}.get(shape, 0)
+
+# --- PIL (si disponible) ---
 def draw_shape_pil(d: "ImageDraw.ImageDraw", shape: str, cx: int, cy: int, size_px: int, rot_rad: float, color=(17,17,17)):
     if shape == "circle":
         r = size_px//2
@@ -120,7 +170,6 @@ def draw_shape_pil(d: "ImageDraw.ImageDraw", shape: str, cx: int, cy: int, size_
         d.polygon(pts, outline=color, width=2)
 
 def render_matrix_png(cells:List[Dict], size=(480,480)) -> bytes:
-    """Renderiza matriz (PIL). Retorna PNG en bytes."""
     w,h = size
     img = Image.new("RGB", (w,h), (255,255,255))
     d = ImageDraw.Draw(img)
@@ -162,27 +211,20 @@ def render_option_png(shape:str, size_rel:float, rot:float, size=(120,120)) -> b
     buf = BytesIO(); img.save(buf, format="PNG", optimize=True); buf.seek(0)
     return buf.read()
 
-# ------------------------- Dibujo Plotly (safe mode) --------------------
-def shape_to_sides(shape:str)->int:
-    return {"triangle":3, "square":4, "pentagon":5}.get(shape, 0)
-
+# --- Plotly (fallback seguro) ---
 def render_matrix_plotly(cells:List[Dict], size_px=500)->go.Figure:
     fig = go.Figure()
-    # cuadro
     fig.add_shape(type="rect", x0=0, y0=0, x1=3, y1=3, line=dict(color="black", width=2))
-    # grillas
     fig.add_shape(type="line", x0=1, y0=0, x1=1, y1=3, line=dict(color="#BBBBBB"))
     fig.add_shape(type="line", x0=2, y0=0, x1=2, y1=3, line=dict(color="#BBBBBB"))
     fig.add_shape(type="line", x0=0, y0=1, x1=3, y1=1, line=dict(color="#BBBBBB"))
     fig.add_shape(type="line", x0=0, y0=2, x1=3, y1=2, line=dict(color="#BBBBBB"))
 
-    # dibujar celdas
     centers=[(0.5,0.5),(1.5,0.5),(2.5,0.5),
              (0.5,1.5),(1.5,1.5),(2.5,1.5),
              (0.5,2.5),(1.5,2.5),(2.5,2.5)]
     for k, cell in enumerate(cells):
         if k==8:
-            # "faltante": marco punteado
             x,y = centers[k]
             fig.add_shape(type="rect", x0=x-0.35, y0=y-0.35, x1=x+0.35, y1=y+0.35,
                           line=dict(color="#AAAAAA", dash="dash"))
@@ -190,12 +232,10 @@ def render_matrix_plotly(cells:List[Dict], size_px=500)->go.Figure:
         shp, srel, rot = cell["shape"], cell["size"], cell["rot"]
         sides = shape_to_sides(shp)
         if sides==0:
-            # círculo
             r = 0.28*srel/0.32
             fig.add_shape(type="circle", x0=centers[k][0]-r, y0=centers[k][1]-r,
                           x1=centers[k][0]+r, y1=centers[k][1]+r, line=dict(color="#111", width=2))
         else:
-            # polígono
             r = 0.28*srel/0.32
             pts=[]
             for i2 in range(sides):
@@ -232,7 +272,9 @@ def render_option_plotly(shape:str, size_rel:float, rot:float, size_px=150)->go.
     fig.update_layout(height=size_px, margin=dict(l=10,r=10,t=10,b=10), plot_bgcolor="white")
     return fig
 
-# ------------------------- Reglas ---------------------------------------
+# ----------------------------------------------------------------------
+# Reglas Raven (4 tipos para variedad)
+# ----------------------------------------------------------------------
 def rule_rotation(seed:int):
     rng = random.Random(seed)
     rule, diff = "Rotación progresiva", "Media"
@@ -350,7 +392,9 @@ def get_item(idx:int, seed:int=SEED)->RavenItem:
     rule, diff, cells, correct, opts = rule_fn(seed + idx*137)
     return RavenItem(idx=idx, rule=rule, difficulty=diff, correct_tuple=correct, options=opts, cells=cells)
 
-# ------------------------- Scoring --------------------------------------
+# ----------------------------------------------------------------------
+# Scoring y reportes
+# ----------------------------------------------------------------------
 def compute_result(n_items:int, answers:Dict[int,int])->Dict:
     raw=0
     rule_stats: Dict[str,Dict[str,int]] = {}
@@ -366,6 +410,7 @@ def compute_result(n_items:int, answers:Dict[int,int])->Dict:
         diff_stats[it.difficulty]["tot"] += 1
         if ok: diff_stats[it.difficulty]["ok"] += 1
     pct = raw/n_items*100 if n_items>0 else 0.0
+    # Mapa percentil (aprox razonable para 60 ítems
     if raw <= 15: perc = 10
     elif raw <= 22: perc = 20
     elif raw <= 30: perc = 35
@@ -379,19 +424,6 @@ def compute_result(n_items:int, answers:Dict[int,int])->Dict:
         secs = 0
     return {"raw":raw, "pct":round(pct,1), "percentil":perc, "rule_stats":rule_stats, "diff_stats":diff_stats, "secs":secs}
 
-# ------------------------- Callbacks ------------------------------------
-def on_pick(i:int, opt:int):
-    st.session_state.answers[i] = opt
-    if i < N_ITEMS-1:
-        st.session_state.q_idx = i+1
-        st.session_state.stage = "test"
-    else:
-        st.session_state.stage = "resultados"
-        st.session_state.end_time = datetime.now()
-        st.session_state.fecha = st.session_state.end_time.strftime("%d/%m/%Y %H:%M")
-    st.rerun()
-
-# ------------------------- Exporters (diferidos) ------------------------
 def build_html_light(n_items:int, answers:Dict[int,int], result:Dict)->bytes:
     rows=""
     for i in range(n_items):
@@ -433,8 +465,7 @@ th,td{{border:1px solid #eee; padding:8px; text-align:left;}}
     return html.encode("utf-8")
 
 def build_html_thumbs(n_items:int, answers:Dict[int,int], result:Dict)->bytes:
-    # Si PIL no está, no podemos hacer miniaturas, devolvemos el ligero.
-    if not SAFE_PIL:
+    if not HAS_PIL:
         return build_html_light(n_items, answers, result)
 
     secs=result["secs"]; m,s=divmod(secs,60)
@@ -498,43 +529,59 @@ th,td{{border:1px solid #eee; padding:8px; text-align:left; vertical-align:top;}
 </body></html>""")
     return "".join(parts).encode("utf-8")
 
-# ------------------------- Vistas ---------------------------------------
+# ----------------------------------------------------------------------
+# Callbacks (autoavance, sin doble click)
+# ----------------------------------------------------------------------
+def on_pick(i:int, opt:int):
+    st.session_state.answers[i] = opt
+    if i < N_ITEMS-1:
+        st.session_state.q_idx = i+1
+        st.session_state.stage = "test"
+    else:
+        st.session_state.stage = "resultados"
+        st.session_state.end_time = datetime.now()
+        st.session_state.fecha = st.session_state.end_time.strftime("%d/%m/%Y %H:%M")
+    st.rerun()
+
+# ----------------------------------------------------------------------
+# Vistas — MISMA ESTRUCTURA QUE BIG FIVE
+# ----------------------------------------------------------------------
 def view_inicio():
     st.markdown("""
     <div class="card">
       <div class="big-title">🧩 Test Raven — Matrices Progresivas (PRO)</div>
-      <p class="small" style="margin:0;">60 ítems · matriz/opciones generadas al vuelo (lazy) · diseño liviano y responsivo</p>
+      <p class="small" style="margin:0;">60 ítems · generación “al vuelo” (lazy) · diseño profesional y responsivo</p>
     </div>
     """, unsafe_allow_html=True)
 
-    if not SAFE_PIL:
+    if not HAS_PIL:
         st.markdown(
-            "<div class='info-safe'>⚠️ Modo seguro: PIL no disponible. "
-            "La app usará renderización Plotly (SVG) para la matriz y opciones. "
-            "Todo funciona igual; las exportaciones con miniaturas usarán el reporte ligero.</div>",
+            "<div class='info-safe'>⚠️ Modo seguro: Pillow no está disponible. "
+            "Se usará renderizado Plotly (SVG) para matrices y opciones. "
+            "Todo funciona; exportación con miniaturas requiere Pillow.</div>",
             unsafe_allow_html=True,
         )
 
-    c1, c2 = st.columns([1.35,1])
-    with c1:
-        st.markdown(f"""
+    col1, col2 = st.columns([1.35,1])
+    with col1:
+        st.markdown("""
         <div class="card">
-          <h3 style="margin-top:0">¿Qué mide?</h3>
-          <p>Razonamiento fluido: detectar reglas visuales en una matriz 3×3 con una casilla faltante.</p>
+          <h3 style="margin-top:0">¿Qué es Raven?</h3>
+          <p>Evalúa razonamiento fluido al descubrir reglas en matrices 3×3 con una casilla faltante.</p>
           <ul>
-            <li><b>Número de ítems:</b> {N_ITEMS}</li>
-            <li><b>Auto-avance:</b> al seleccionar una opción pasas al siguiente ítem.</li>
-            <li><b>Resultados:</b> KPIs generales, exactitud por regla/dificultad, tabla por ítem, exportación HTML.</li>
+            <li><b>Ítems:</b> 60</li>
+            <li><b>Autoavance:</b> al elegir opción, pasa al siguiente.</li>
+            <li><b>Salida:</b> KPIs generales, exactitud por regla y dificultad, tabla por ítem, export HTML.</li>
           </ul>
         </div>
         """, unsafe_allow_html=True)
-    with c2:
+    with col2:
         st.markdown("""
         <div class="card">
           <h3 style="margin-top:0">Recomendaciones</h3>
           <ul>
-            <li>Navegador actualizado (Chrome/Edge/Firefox).</li>
-            <li>Conexión estable (las imágenes se dibujan en el momento).</li>
+            <li>Usa un navegador moderno (Chrome/Edge/Firefox).</li>
+            <li>Evita recargar la página una vez iniciado.</li>
           </ul>
         </div>
         """, unsafe_allow_html=True)
@@ -561,10 +608,10 @@ def view_test():
     </div>
     """, unsafe_allow_html=True)
 
-    # Matriz (solo del ítem actual)
+    # Matriz — SOLO el ítem actual (lazy)
     with st.container():
         st.markdown("<div class='card'>", unsafe_allow_html=True)
-        if SAFE_PIL:
+        if HAS_PIL:
             q_png = render_matrix_png(it.cells, size=IMG_MTX)
             st.image(q_png, use_column_width=True)
         else:
@@ -572,13 +619,13 @@ def view_test():
             st.plotly_chart(fig, use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # Alternativas: 8 botones (sin radio)
+    # Alternativas: 8 botones con auto-avance
     st.markdown("### Alternativas")
     cols = st.columns(4)
     for k, tup in enumerate(it.options):
         with cols[k%4]:
             st.markdown("<div class='choice'>", unsafe_allow_html=True)
-            if SAFE_PIL:
+            if HAS_PIL:
                 op_png = render_option_png(*tup, size=IMG_OPT)
                 st.image(op_png, use_container_width=True)
             else:
@@ -611,6 +658,7 @@ def view_resultados():
     st.markdown(f"<div class='kpi'><div class='label'>Tiempo total</div><div class='value'>{m:02d}:{s:02d} min</div></div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
+    # Tablas resumen (igual estilo que Big Five)
     st.markdown("---")
     st.subheader("📋 Resumen por ítem")
     rows=[]
@@ -628,7 +676,7 @@ def view_resultados():
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     st.markdown("---")
-    st.subheader("🔎 Exactitud por tipo de regla y dificultad")
+    st.subheader("🔎 Exactitud por regla y por dificultad")
     rule_rows=[]
     for r,stt in result["rule_stats"].items():
         ok, tot = stt["ok"], stt["tot"]; acc = ok/tot*100 if tot>0 else 0
@@ -641,9 +689,9 @@ def view_resultados():
         diff_rows.append({"Dificultad": d, "Correctos": ok, "Total": tot, "Exactitud %": round(acc,1)})
     st.dataframe(pd.DataFrame(diff_rows), use_container_width=True, hide_index=True)
 
+    # Export (idéntico patrón: generar ⇒ luego botón descarga)
     st.markdown("---")
     st.subheader("📥 Exportar informe")
-
     c1, c2 = st.columns(2)
     with c1:
         if st.button("🛠️ Generar reporte (HTML ligero)", use_container_width=True):
@@ -671,7 +719,7 @@ def view_resultados():
                 mime="text/html",
                 use_container_width=True
             )
-            st.caption("Incluye miniaturas de cada ítem y sus 8 opciones (si PIL está disponible).")
+            st.caption("Incluye miniaturas de cada ítem y sus 8 opciones (requiere Pillow).")
 
     st.markdown("---")
     if st.button("🔄 Nueva prueba", type="primary", use_container_width=True):
@@ -685,7 +733,9 @@ def view_resultados():
         st.session_state.report_thumbs=None
         st.rerun()
 
-# ------------------------- Flujo principal ------------------------------
+# ----------------------------------------------------------------------
+# Flujo principal (misma lógica que Big Five)
+# ----------------------------------------------------------------------
 if st.session_state.stage == "inicio":
     view_inicio()
 elif st.session_state.stage == "test":

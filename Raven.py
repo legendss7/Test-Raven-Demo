@@ -1,15 +1,11 @@
-# app_raven_bigfive.py
-# ------------------------------------------------------------
-# Test de Razonamiento Matricial (estilo Raven) – 60 ítems
-# Estructura tipo "Test Big Five":
-#   - vista_inicio → vista_test_activo → vista_resultados
-#   - StateManager con stages: 'inicio', 'test_activo', 'resultados'
-# Requisitos solicitados:
-#   - Genera y CACHEA imágenes de cada ítem y alternativas en /assets/raven_items
-#   - Cada pregunta independiente; clic en alternativa avanza
-#   - Diseño con hero, KPIs, barra de progreso, gauge, glass cards
-#   - Informe profesional con descarga en PDF (usa fpdf si está instalada)
-# ------------------------------------------------------------
+# raven_bigfive_ui_blanco.py
+# =====================================================================================
+# Test de Razonamiento Matricial (estilo Raven) — 60 ítems
+# Estructura y DISEÑO basados en el código Big Five (UI blanco, tarjetas, KPIs, gauges)
+# Flujo: stage = inicio → test → resultados | Autoavance al elegir alternativa
+# Genera y CACHEA imágenes de los ítems/alternativas en ./assets/raven_items/
+# Exporta Informe (PDF con matplotlib si está disponible, de lo contrario HTML imprimible)
+# =====================================================================================
 
 import os
 import io
@@ -18,52 +14,81 @@ import math
 import time
 import random
 from datetime import datetime
+from io import BytesIO
 
 import numpy as np
+import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 
 import streamlit as st
 import plotly.graph_objects as go
-try:
-    import streamlit.components.v1 as components
-except Exception:
-    components = None
 
+# Intento usar matplotlib para PDF (seguimos patrón del Big Five)
+HAS_MPL = False
 try:
-    from fpdf import FPDF
-    FPDF_AVAILABLE = True
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+    from matplotlib.patches import FancyBboxPatch, Wedge, Circle
+    HAS_MPL = True
 except Exception:
-    FPDF_AVAILABLE = False
+    HAS_MPL = False
 
-# ------------------ CONFIG PÁGINA ----------------------------
+# -------------------------------------------------------------------------------------------------
+# Config general de página (igual estética y estructura base que el Big Five de referencia)
+# -------------------------------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Raven Style • 60 Ítems",
-    page_icon="🧠",
+    page_title="Raven • Evaluación Matricial (60 ítems)",
+    page_icon="🧩",
     layout="wide",
+    initial_sidebar_state="collapsed",
 )
 
-# ------------------ ESTILOS (CSS) ----------------------------
-STYLES = """
+# -------------------------------------------------------------------------------------------------
+# Estilos (copian el espíritu del Big Five: fondo blanco, tipografías, tarjetas, KPIs, pastel classes)
+# -------------------------------------------------------------------------------------------------
+st.markdown(
+    """
 <style>
-  .stApp { background: linear-gradient(135deg, #0f172a 0%, #111827 40%, #1f2937 100%); color:#e5e7eb; }
-  .glass{ background: rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.08);
-          box-shadow:0 10px 30px rgba(0,0,0,.35); border-radius:16px; padding:1.25rem; }
-  .hero-title{ font-size:40px; font-weight:800; letter-spacing:.4px; margin-bottom:.25rem;
-               background: linear-gradient(90deg,#60a5fa,#a78bfa,#f472b6);
-               -webkit-background-clip:text; background-clip:text; color:transparent; }
-  .hero-subtitle{ color:#cbd5e1; }
-  .pill{ display:inline-block; padding:6px 12px; border:1px solid rgba(255,255,255,.2); border-radius:999px; font-size:12px; color:#cbd5e1; }
-  .kpi{ text-align:center; }
-  .kpi h2{ margin:0; font-size:28px; }
-  .kpi p{ margin:0; color:#cbd5e1; }
-  .progress-wrap{ height:10px; border-radius:8px; background:rgba(255,255,255,.1); }
-  .progress-bar{ height:10px; border-radius:8px; background: linear-gradient(90deg,#22d3ee,#a78bfa); }
-  .caption{ color:#94a3b8; font-size:12px; }
-</style>
-"""
-st.markdown(STYLES, unsafe_allow_html=True)
+[data-testid="stSidebar"] { display:none !important; }
+html, body, [data-testid="stAppViewContainer"]{
+  background:#ffffff !important; color:#111 !important;
+  font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+}
+.block-container{ max-width:1200px; padding-top:0.8rem; padding-bottom:2rem; }
+.dim-title{ font-size:clamp(2.2rem, 5vw, 3.2rem); font-weight:900; letter-spacing:.2px; line-height:1.12; margin:.2rem 0 .6rem 0; }
+.dim-desc{ margin:.1rem 0 1rem 0; opacity:.9; }
+.card{ border:1px solid #eee; border-radius:14px; background:#fff; box-shadow: 0 2px 0 rgba(0,0,0,0.03); padding:18px; }
+.kpi-grid{ display:grid; grid-template-columns: repeat(auto-fit, minmax(200px,1fr)); gap:12px; margin:10px 0 6px 0; }
+.kpi{ border:1px solid #eee; border-radius:14px; background:#fff; padding:16px; position:relative; overflow:hidden; }
+.kpi .label{ font-size:.95rem; opacity:.85; }
+.kpi .value{ font-size:2.2rem; font-weight:900; line-height:1; }
+.tag{ display:inline-block; padding:.2rem .6rem; border:1px solid #eee; border-radius:999px; font-size:.82rem; }
+hr{ border:none; border-top:1px solid #eee; margin:16px 0; }
 
-# ------------------ RUTAS / FUENTES --------------------------
+/* Tarjeta de análisis */
+.dim-card{ border:1px solid #eee; border-radius:14px; overflow:hidden; background:#fff; }
+.dim-card-header{ padding:14px 16px; display:flex; align-items:center; gap:10px; border-bottom:1px solid #eee; }
+.dim-chip { font-weight:800; padding:.2rem .6rem; border-radius:999px; border:1px solid rgba(0,0,0,.06); background:#fff; }
+.dim-title-row{ display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; }
+.dim-title-name{ font-size:1.2rem; font-weight:800; margin:0; }
+.dim-score{ font-size:1.1rem; font-weight:800; }
+.dim-body{ padding:16px; }
+.dim-grid{ display:grid; grid-template-columns: repeat(auto-fit, minmax(260px,1fr)); gap:12px; }
+.dim-section{ border:1px solid #eee; border-radius:12px; padding:12px; background:#fff; }
+.dim-section h4{ margin:.2rem 0 .4rem 0; font-size:1rem; }
+.small{ font-size:0.95rem; opacity:.9; }
+
+/* Paleta pastel para bloques informativos */
+.pastel-R { background:#F0F7FF; border-color:#E0EEFF; }
+.pastel-M { background:#FFF6F2; border-color:#FFE7DE; }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+# -------------------------------------------------------------------------------------------------
+# Paths y fuentes
+# -------------------------------------------------------------------------------------------------
 BASE_DIR = os.path.abspath(os.getcwd())
 ASSETS_DIR = os.path.join(BASE_DIR, "assets", "raven_items")
 os.makedirs(ASSETS_DIR, exist_ok=True)
@@ -82,8 +107,9 @@ def get_font(size=24):
                 pass
     return ImageFont.load_default()
 
-# ------------------ GENERACIÓN ÍTEMS -------------------------
-# Ítems "estilo Raven" generados proceduralmente (no oficiales)
+# -------------------------------------------------------------------------------------------------
+# Generación procedural de ítems (original; NO usa ítems oficiales del RPM de Raven)
+# -------------------------------------------------------------------------------------------------
 CANVAS_SIZE = 512
 GRID = 3
 CELL = CANVAS_SIZE // GRID
@@ -133,12 +159,10 @@ def rule_progressions(seed):
     size_start = rng.randint(14, 22)
     rotation_start = rng.choice([0, 15, 30, 45])
     shade_start = rng.randint(10, 120)
-
     count_step_row = rng.choice([1, 1, 2])
     size_step_col = rng.choice([2, 3, 4])
     rotation_step_col = rng.choice([15, 30])
     shade_step_row = rng.choice([10, 15, 20])
-
     grid_params = []
     for r in range(3):
         row = []
@@ -244,418 +268,457 @@ def build_item_bank(total_items=60, master_seed=20251024):
         bank.append(meta)
     return bank
 
-# ------------------ STATE MANAGER ----------------------------
-class StateManager:
-    @staticmethod
-    def initialize():
-        if 'stage' not in st.session_state:
-            st.session_state.stage = 'inicio'
-        if 'item_bank' not in st.session_state:
-            st.session_state.item_bank = build_item_bank(60, master_seed=20251024)
-        if 'q_idx' not in st.session_state:
-            st.session_state.q_idx = 0
-        if 'answers' not in st.session_state:
-            st.session_state.answers = {}
-        if 'user' not in st.session_state:
-            st.session_state.user = {"nombre":"", "edad":"", "educacion":""}
-        if 'timer' not in st.session_state:
-            st.session_state.timer = time.time()
-        if 'start_ts' not in st.session_state:
-            st.session_state.start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        if 'scroll_key' not in st.session_state:
-            st.session_state.scroll_key = 0
-        if 'navigation_flag' not in st.session_state:
-            st.session_state.navigation_flag = False
+# -------------------------------------------------------------------------------------------------
+# Estado (mismo patrón de etapas del Big Five)
+# -------------------------------------------------------------------------------------------------
+if "stage" not in st.session_state: st.session_state.stage = "inicio"   # inicio | test | resultados
+if "q_idx" not in st.session_state: st.session_state.q_idx = 0
+if "answers" not in st.session_state: st.session_state.answers = {}
+if "fecha" not in st.session_state: st.session_state.fecha = None
+if "item_bank" not in st.session_state: st.session_state.item_bank = build_item_bank(60, master_seed=20251024)
+if "_needs_rerun" not in st.session_state: st.session_state._needs_rerun = False
+if "timer" not in st.session_state: st.session_state.timer = time.time()
 
-    @staticmethod
-    def go_test():
-        st.session_state.stage = 'test_activo'
-        st.session_state.timer = time.time()
-        st.rerun()
+# -------------------------------------------------------------------------------------------------
+# Utilidades de resultados
+# -------------------------------------------------------------------------------------------------
 
-    @staticmethod
-    def next_question():
-        st.session_state.q_idx += 1
-        st.session_state.timer = time.time()
-        st.session_state.scroll_key += 1
-        st.session_state.navigation_flag = True
-        st.rerun()
-
-    @staticmethod
-    def to_results():
-        st.session_state.stage = 'resultados'
-        st.rerun()
-
-# ------------------ WIDGETS AUX ------------------------------
-
-def barra_progreso():
+def compute_raven_scores(answers: dict):
     total = len(st.session_state.item_bank)
-    idx = st.session_state.q_idx
-    pct = int(100 * idx / total)
-    st.markdown("<div class='glass'>", unsafe_allow_html=True)
-    st.write(f"**Progreso:** {idx} / {total}")
-    st.markdown("""
-        <div class='progress-wrap'><div class='progress-bar' style='width:%d%%'></div></div>
-    """ % pct, unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-
-def forzar_scroll_al_top():
-    js_code = """
-      <script>
-        setTimeout(function(){
-          try {
-            var cont = window.parent.document.querySelector('[data-testid="stAppViewContainer"]');
-            if (cont) { cont.scrollTo({top:0, behavior:'auto'}); }
-            window.parent.scrollTo({top:0, behavior:'auto'});
-          } catch(e) {}
-        }, 120);
-      </script>
-    """
-    try:
-        if components is not None:
-            components.html(js_code, height=1, scrolling=False, key=f"scroll_{st.session_state.get('scroll_key',0)}")
-        else:
-            st.components.v1.html(js_code, height=1, scrolling=False, key=f"scroll_{st.session_state.get('scroll_key',0)}")
-    except Exception:
-        pass
-
-# ------------------ CÁLCULO RESULTADOS -----------------------
-
-def compute_score(answers: dict):
-    total = len(st.session_state.item_bank)
+    correct = sum(1 for v in answers.values() if v and v.get("correct"))
     answered = len(answers)
-    correct = sum(1 for v in answers.values() if v.get('correct'))
-    avg_rt = np.mean([v.get('rt', 0) for v in answers.values()]) if answered else 0
-    weighted = 0.0
-    max_w = 0.0
-    for idx, v in answers.items():
-        diff = v.get('difficulty', 0.5)
-        w = 0.5 + diff
-        max_w += w
-        if v.get('correct'):
-            weighted += w
-    weighted_pct = (weighted / max_w) if max_w > 0 else 0
-    raw_pct = correct / total
-    perc = int(100 * (1 / (1 + math.exp(-10 * (raw_pct - 0.5)))))
+    avg_rt = float(np.mean([v.get("rt",0.0) for v in answers.values()])) if answered else 0.0
+    raw_pct = (correct/total) if total>0 else 0.0
+    percentile_est = int(100 * (1/(1+math.exp(-10*(raw_pct-0.5)))))
+    # buckets por dificultad (5 grupos) para gráficas
+    diffs = [st.session_state.item_bank[i-1]["difficulty"] for i in range(1,total+1)]
+    buckets = {k: {"n":0, "ok":0} for k in ["Muy baja","Baja","Media","Alta","Muy alta"]}
+    for i in range(total):
+        d = diffs[i]
+        key = "Muy baja" if d<0.36 else ("Baja" if d<0.52 else ("Media" if d<0.68 else ("Alta" if d<0.84 else "Muy alta")))
+        buckets[key]["n"] += 1
+        if answers.get(i) and answers[i].get("correct"): buckets[key]["ok"] += 1
     return {
-        'total': total,
-        'answered': answered,
-        'correct': correct,
-        'raw_pct': raw_pct,
-        'avg_rt': avg_rt,
-        'weighted_pct': weighted_pct,
-        'percentile_est': perc,
+        "total": total,
+        "answered": answered,
+        "correct": correct,
+        "raw_pct": raw_pct,
+        "avg_rt": avg_rt,
+        "percentile_est": percentile_est,
+        "by_diff": buckets,
     }
 
 
-def narrative_from_score(s):
-    pct = s['raw_pct']
-    if pct >= 0.85:
-        level = "Muy alto"
-        summary = (
-            "Desempeño sobresaliente: excelente razonamiento abstracto, detección de patrones y eficiencia atencional. "
-            "Alta flexibilidad cognitiva y control ejecutivo."
+def raven_narrative(scores: dict):
+    p = scores["raw_pct"]
+    if p>=0.85:
+        lvl = "Muy alto"
+        txt = (
+            "Rendimiento excepcional en razonamiento abstracto y detección de patrones; alta flexibilidad cognitiva "
+            "y control atencional. Suele aprender reglas nuevas con rapidez y transferirlas a contextos distintos."
         )
-        recs = [
-            "Entornos con alta complejidad analítica.",
-            "Proyectos de modelamiento/ciencia de datos.",
-            "Mentoría o liderazgo técnico.",
-        ]
-    elif pct >= 0.70:
-        level = "Alto"
-        summary = (
-            "Resultados superiores al promedio; buena discriminación de reglas visuales, adaptabilidad y consistencia."
+        rec = ["Desafíos de alta complejidad analítica", "Proyectos de modelamiento/algoritmos", "Mentoría técnica"]
+    elif p>=0.70:
+        lvl = "Alto"
+        txt = (
+            "Superior al promedio: discriminación sólida de reglas visuales, buena consistencia y adaptación. "
+            "Se beneficia de tareas con carga analítica creciente."
         )
-        recs = [
-            "Aumentar progresivamente la complejidad de tareas.",
-            "Ejercicios de razonamiento lógico bajo tiempo.",
-            "Roles con análisis comparativo y decisión.",
-        ]
-    elif pct >= 0.50:
-        level = "Medio"
-        summary = (
-            "Desempeño promedio: capacidad adecuada para identificar patrones, "
-            "con oportunidades de mejora en rapidez y consistencia en ítems difíciles."
+        rec = ["Ejercicios bajo tiempo moderado", "Tareas con reglas combinadas", "Análisis comparativo"]
+    elif p>=0.50:
+        lvl = "Medio"
+        txt = (
+            "Dentro del promedio: reconoce patrones frecuentes; puede mejorar en rapidez y verificación en ítems complejos."
         )
-        recs = [
-            "Rompecabezas visuales y series.",
-            "Práctica con límite de tiempo moderado.",
-            "Estrategias de verificación antes de responder.",
-        ]
-    elif pct >= 0.30:
-        level = "Medio-bajo"
-        summary = (
-            "Bajo el promedio: aciertos en ítems de dificultad baja-media; mayor desafío en reglas combinadas."
+        rec = ["Rompecabezas visuales y series", "Chequeo sistemático fila/columna", "Práctica con feedback inmediato"]
+    elif p>=0.30:
+        lvl = "Medio-bajo"
+        txt = (
+            "Le cuesta estabilizar la regla cuando hay distractores sutiles o combinaciones múltiples; sugiere consolidar fundamentos."
         )
-        recs = [
-            "Repasar progresiones (cantidad, tamaño, rotación, sombreado).",
-            "Analizar por filas/columnas antes de integrar reglas.",
-            "Exposición gradual a matrices con múltiples reglas.",
-        ]
+        rec = ["Revisión guiada de principios (cantidad, tamaño, giro, sombreado)", "Entrenamiento progresivo por bloques", "Pausas breves para manejo de estrés"]
     else:
-        level = "Bajo"
-        summary = (
-            "Dificultades consistentes en detección de patrones; posible interferencia por ansiedad o manejo del tiempo."
+        lvl = "Bajo"
+        txt = (
+            "Dificultades consistentes en la detección de patrones; posible interferencia por ansiedad/tiempo. "
+            "Se recomienda práctica estructurada y ejemplos resueltos."
         )
-        recs = [
-            "Guías paso a paso con ejemplos.",
-            "Técnicas de respiración/pausas para estrés.",
-            "Repetición espaciada con feedback inmediato.",
-        ]
-    return level, summary, recs
+        rec = ["Guías paso a paso", "Respiración 4-7-8 en transición entre ítems", "Repetición espaciada"]
+    return lvl, txt, rec
 
-# ------------------ PDF --------------------------------------
+# -------------------------------------------------------------------------------------------------
+# Gráficos (gauge semicircular, barras de dificultad)
+# -------------------------------------------------------------------------------------------------
 
-def build_pdf(user, scores, details, start_ts):
-    if not FPDF_AVAILABLE:
+def gauge_plotly(value: float, title: str = ""):
+    v = max(0, min(100, float(value)))
+    bounds = [0, 25, 40, 60, 75, 100]
+    colors = ["#fde2e1", "#fff0c2", "#e9f2fb", "#e7f6e8", "#d9f2db"]
+    vals = [bounds[i+1]-bounds[i] for i in range(len(bounds)-1)]
+    fig = go.Figure()
+    fig.add_trace(go.Pie(values=vals, hole=0.6, rotation=180, direction="clockwise",
+                         textinfo="none", marker=dict(colors=colors, line=dict(color="#ffffff", width=1)),
+                         hoverinfo="skip", showlegend=False, sort=False))
+    theta = (180 * (v/100.0))
+    r = 0.95; x0, y0 = 0.5, 0.5
+    xe = x0 + r*math.cos(math.radians(180 - theta))
+    ye = y0 + r*math.sin(math.radians(180 - theta))
+    fig.add_shape(type="line", x0=x0, y0=y0, x1=xe, y1=ye, line=dict(color="#6D597A", width=4))
+    fig.add_shape(type="circle", x0=x0-0.02, y0=y0-0.02, x1=x0+0.02, y1=y0+0.02,
+                  line=dict(color="#6D597A"), fillcolor="#6D597A")
+    fig.update_layout(annotations=[
+        dict(text=f"<b>{v:.1f}</b>", x=0.5, y=0.32, showarrow=False, font=dict(size=24, color="#111")),
+        dict(text=title, x=0.5, y=0.16, showarrow=False, font=dict(size=13, color="#333"))],
+        margin=dict(l=10, r=10, t=10, b=10), showlegend=False, height=220, template="plotly_white")
+    return fig
+
+
+def plot_by_difficulty(scores: dict):
+    data = scores["by_diff"]
+    cats = ["Muy baja","Baja","Media","Alta","Muy alta"]
+    vals = []
+    for c in cats:
+        n = data[c]["n"]; ok = data[c]["ok"]
+        pct = 0 if n==0 else 100.0*ok/n
+        vals.append(pct)
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=cats, y=vals, marker=dict(color=["#d9f2db","#e7f6e8","#e9f2fb","#fff0c2","#fde2e1"])) )
+    fig.update_layout(height=380, template="plotly_white",
+                      yaxis=dict(range=[0,100], title="% Acierto"), xaxis=dict(title="Dificultad"))
+    return fig
+
+# -------------------------------------------------------------------------------------------------
+# Exportar reporte
+# -------------------------------------------------------------------------------------------------
+
+def pdf_semicircle(ax, value, cx=0.5, cy=0.5, r=0.45):
+    v = max(0, min(100, float(value)))
+    bands = [(0,25,"#fde2e1"), (25,40,"#fff0c2"), (40,60,"#e9f2fb"), (60,75,"#e7f6e8"), (75,100,"#d9f2db")]
+    for a,b,c in bands:
+        ang1 = 180*(a/100.0); ang2 = 180*(b/100.0)
+        w = Wedge((cx,cy), r, 180-ang2, 180-ang1, facecolor=c, edgecolor="#fff", lw=1)
+        ax.add_patch(w)
+    theta = math.radians(180*(v/100.0))
+    x2 = cx + r*0.95*math.cos(np.pi - theta)
+    y2 = cy + r*0.95*math.sin(np.pi - theta)
+    ax.plot([cx, x2], [cy, y2], color="#6D597A", lw=3)
+    ax.add_patch(Circle((cx,cy), 0.02, color="#6D597A"))
+    ax.text(cx, cy-0.12, f"{v:.1f}", ha="center", va="center", fontsize=16, color="#111")
+
+
+def build_pdf(scores: dict, fecha: str, answers: dict) -> bytes:
+    if not HAS_MPL:
         return None
-    nombre = user.get('nombre') or 'Participante'
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.add_page()
-    pdf.set_fill_color(17,24,39)
-    pdf.rect(0,0,210,30,'F')
-    pdf.set_text_color(255,255,255)
-    pdf.set_font('Arial','B',16)
-    pdf.set_xy(10,10)
-    pdf.cell(0,10,'Informe – Test Matricial (estilo Raven)', ln=1)
-    pdf.set_text_color(0,0,0)
-    pdf.ln(5)
-    pdf.set_font('Arial','',12)
-    pdf.cell(0,8,f"Participante: {nombre}", ln=1)
-    if user.get('edad'):
-        pdf.cell(0,8,f"Edad: {user.get('edad')}", ln=1)
-    if user.get('educacion'):
-        pdf.cell(0,8,f"Educación/Cargo: {user.get('educacion')}", ln=1)
-    pdf.cell(0,8,f"Fecha de inicio: {start_ts}", ln=1)
-    pdf.cell(0,8,f"Emitido: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ln=1)
-    pdf.ln(4)
-    pdf.set_font('Arial','B',13)
-    pdf.cell(0,8,'Resumen de resultados', ln=1)
-    pdf.set_font('Arial','',12)
-    pdf.cell(0,8,f"Aciertos: {scores['correct']} de {scores['total']} ({int(scores['raw_pct']*100)}%)", ln=1)
-    pdf.cell(0,8,f"Tiempo medio: {scores['avg_rt']:.1f} s", ln=1)
-    pdf.cell(0,8,f"Percentil estimado (ref.): {scores['percentile_est']}", ln=1)
-    level, summary, recs = narrative_from_score(scores)
-    pdf.ln(3)
-    pdf.set_font('Arial','B',13)
-    pdf.cell(0,8,f"Perfil: {level}", ln=1)
-    pdf.set_font('Arial','',12)
-    pdf.multi_cell(0,7, summary)
-    pdf.ln(2)
-    pdf.set_font('Arial','B',12)
-    pdf.cell(0,8,'Recomendaciones', ln=1)
-    pdf.set_font('Arial','',12)
-    for r in recs:
-        pdf.multi_cell(0,7, f"• {r}")
-    pdf.add_page()
-    pdf.set_font('Arial','B',13)
-    pdf.cell(0,8,'Detalle de respuestas', ln=1)
-    pdf.set_font('Arial','',11)
-    pdf.cell(0,8,'Ítem    Resp.   Correcto   RT(s)', ln=1)
-    for i in range(scores['total']):
-        v = details.get(i)
-        if v is None:
-            pdf.cell(0,6, f"{i+1:02d}      —       —        —", ln=1)
-        else:
-            ch = v.get('choice')
-            ch_label = '-' if ch is None else chr(ord('A')+ch)
-            corr = 'Sí' if v.get('correct') else 'No'
-            rt = f"{v.get('rt',0):.1f}"
-            pdf.cell(0,6, f"{i+1:02d}      {ch_label:>2}      {corr:^7}    {rt:>5}", ln=1)
-    pdf.ln(4)
-    pdf.set_font('Arial','I',9)
-    pdf.multi_cell(0,5, (
-        "Instrumento inspirado en Raven con ítems generados proceduralmente para fines formativos/ocupacionales. "
-        "No reemplaza baterías estandarizadas ni interpretación clínica."
-    ))
-    return pdf.output(dest='S').encode('latin-1','ignore')
+    total = scores["total"]
+    avg_rt = scores["avg_rt"]
+    prec = scores["raw_pct"]*100
+    perc = scores["percentile_est"]
 
-# ------------------ VISTAS -----------------------------------
+    buf = BytesIO()
+    with PdfPages(buf) as pdf:
+        # Portada con KPIs y medidores
+        fig = plt.figure(figsize=(8.27,11.69))
+        ax = fig.add_axes([0,0,1,1]); ax.axis('off')
+        ax.text(.5,.95,"Informe – Test Matricial (estilo Raven)", ha='center', fontsize=20, fontweight='bold')
+        ax.text(.5,.92,f"Fecha: {fecha}", ha='center', fontsize=11)
 
-def vista_inicio():
-    colA, colB = st.columns([1.2, 1])
-    with colA:
-        st.markdown("<div class='glass'>", unsafe_allow_html=True)
-        st.markdown("<div class='pill'>Evaluación cognitiva</div>", unsafe_allow_html=True)
-        st.markdown("<div class='hero-title'>Test de Razonamiento Matricial (estilo Raven)</div>", unsafe_allow_html=True)
+        def card(ax, x,y,w,h,title,val):
+            r = FancyBboxPatch((x,y), w,h, boxstyle="round,pad=0.012,rounding_size=0.018",
+                               edgecolor="#dddddd", facecolor="#ffffff")
+            ax.add_patch(r)
+            ax.text(x+w*0.06, y+h*0.60, title, fontsize=10, color="#333")
+            ax.text(x+w*0.06, y+h*0.25, f"{val}", fontsize=20, fontweight='bold')
+
+        Y0 = .82; H = .10; W = .40; GAP = .02
+        card(ax, .06, Y0, W, H, "Total ítems", f"{total}")
+        card(ax, .54, Y0, W, H, "Precisión", f"{prec:.1f}%")
+        card(ax, .06, Y0-(H+GAP), W, H, "Tiempo medio por ítem", f"{avg_rt:.1f} s")
+        card(ax, .54, Y0-(H+GAP), W, H, "Percentil estimado", f"{perc}")
+
+        axg1 = fig.add_axes([.18, .54, .22, .16]); axg1.axis('off'); pdf_semicircle(axg1, prec, 0.5, 0.0, 0.9); axg1.text(.5,-.35,"Precisión",ha="center",fontsize=10)
+        axg2 = fig.add_axes([.39, .54, .22, .16]); axg2.axis('off'); pdf_semicircle(axg2, perc, 0.5, 0.0, 0.9); axg2.text(.5,-.35,"Percentil (ref.)",ha="center",fontsize=10)
+
+        pdf.savefig(fig, bbox_inches='tight'); plt.close(fig)
+
+        # Tabla de respuestas
+        fig2 = plt.figure(figsize=(8.27,11.69))
+        a2 = fig2.add_subplot(111); a2.axis('off')
+        a2.text(.5,.95, "Detalle de respuestas", ha='center', fontsize=16, fontweight='bold')
+        y = .90
+        a2.text(.08, y, "Ítem", fontsize=11); a2.text(.20, y, "Resp.", fontsize=11); a2.text(.32, y, "Correcto", fontsize=11); a2.text(.48, y, "RT (s)", fontsize=11)
+        y -= .02
+        for i in range(total):
+            v = answers.get(i)
+            ch = '-' if (v is None or v.get('choice') is None) else chr(ord('A') + v.get('choice'))
+            corr = 'Sí' if (v and v.get('correct')) else 'No'
+            rt = '-' if (v is None) else f"{v.get('rt',0):.1f}"
+            a2.text(.08, y, f"{i+1:02d}", fontsize=10)
+            a2.text(.20, y, f"{ch}", fontsize=10)
+            a2.text(.32, y, f"{corr}", fontsize=10)
+            a2.text(.48, y, f"{rt}", fontsize=10)
+            y -= .02
+            if y < .06:
+                pdf.savefig(fig2, bbox_inches='tight'); plt.close(fig2)
+                fig2 = plt.figure(figsize=(8.27,11.69)); a2 = fig2.add_subplot(111); a2.axis('off'); y=.95
+        if plt.fignum_exists(fig2.number):
+            pdf.savefig(fig2, bbox_inches='tight'); plt.close(fig2)
+
+    buf.seek(0)
+    return buf.read()
+
+
+def build_html(scores: dict, fecha: str, answers: dict) -> bytes:
+    total = scores["total"]; prec = scores["raw_pct"]*100; avg_rt = scores["avg_rt"]; perc = scores["percentile_est"]
+    rows = ""
+    for i in range(total):
+        v = answers.get(i)
+        ch = '-' if (v is None or v.get('choice') is None) else chr(ord('A') + v.get('choice'))
+        corr = 'Sí' if (v and v.get('correct')) else 'No'
+        rt = '-' if (v is None) else f"{v.get('rt',0):.1f}"
+        rows += f"<tr><td>{i+1:02d}</td><td>{ch}</td><td>{corr}</td><td>{rt}</td></tr>"
+    html = f"""<!doctype html>
+<html><head><meta charset=\"utf-8\" /><title>Informe Raven – Estilo</title>
+<style>
+body{{font-family:Inter,Arial; margin:24px; color:#111;}}
+h1{{font-size:24px; margin:0 0 8px 0;}}
+h3{{font-size:18px; margin:.2rem 0;}}
+h4{{font-size:15px; margin:.2rem 0;}}
+table{{border-collapse:collapse; width:100%; margin-top:8px}}
+th,td{{border:1px solid #eee; padding:8px; text-align:left;}}
+.tag{{display:inline-block; padding:.2rem .6rem; border:1px solid #eee; border-radius:999px; font-size:.82rem;}}
+.kpi-grid{{display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; margin:10px 0 6px 0;}}
+.kpi{{border:1px solid #eee; border-radius:12px; padding:12px; background:#fff;}}
+.kpi .label{{font-size:13px; opacity:.85}}
+.kpi .value{{font-size:22px; font-weight:800}}
+@media print{{ .no-print{{display:none}} }}
+</style></head>
+<body>
+<h1>Informe – Test Matricial (estilo Raven)</h1>
+<p>Fecha: <b>{fecha}</b></p>
+<div class=\"kpi-grid\">
+  <div class=\"kpi\"><div class=\"label\">Total ítems</div><div class=\"value\">{total}</div></div>
+  <div class=\"kpi\"><div class=\"label\">Precisión</div><div class=\"value\">{prec:.1f}%</div></div>
+  <div class=\"kpi\"><div class=\"label\">Tiempo medio por ítem</div><div class=\"value\">{avg_rt:.1f} s</div></div>
+  <div class=\"kpi\"><div class=\"label\">Percentil estimado (ref.)</div><div class=\"value\">{perc}</div></div>
+</div>
+<h3>Detalle de respuestas</h3>
+<table><thead><tr><th>Ítem</th><th>Resp.</th><th>Correcto</th><th>RT (s)</th></tr></thead><tbody>
+{rows}
+</tbody></table>
+<div class=\"no-print\" style=\"margin-top:16px;\"><button onclick=\"window.print()\" style=\"padding:10px 14px; border:1px solid #ddd; background:#f9f9f9; border-radius:8px; cursor:pointer;\">Imprimir / Guardar como PDF</button></div>
+</body></html>"""
+    return html.encode("utf-8")
+
+# -------------------------------------------------------------------------------------------------
+# Vistas (estructura igual a la referencia: view_inicio, view_test, view_resultados)
+# -------------------------------------------------------------------------------------------------
+
+def view_inicio():
+    st.markdown(
+        """
+        <div class="card">
+          <h1 style="margin:0 0 6px 0; font-size:clamp(2.2rem,3.8vw,3rem); font-weight:900;">🧩 Test Matricial (estilo Raven) — 60 ítems</h1>
+          <p class="tag" style="margin:0;">UI blanco · Tarjetas · KPIs · Autoavance · Informe PDF</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    c1, c2 = st.columns([1.35,1])
+    with c1:
         st.markdown(
-            "<div class='hero-subtitle'>60 preguntas con dificultad creciente. Simulación inspirada en Raven. Selecciona la alternativa que completa la matriz.</div>",
+            """
+            <div class="card">
+              <h3 style="margin-top:0">¿Qué mide?</h3>
+              <ul style="line-height:1.6">
+                <li>Razonamiento abstracto y <b>detección de patrones</b> en matrices 3×3.</li>
+                <li><b>60 ítems</b> con dificultad creciente (generados proceduralmente).</li>
+                <li>Cada ítem tiene 8 alternativas (A–H).</li>
+              </ul>
+              <p class="small">Simulación inspirada en Raven; no reemplaza una evaluación psicométrica estandarizada.</p>
+            </div>
+            """,
             unsafe_allow_html=True,
         )
-        st.markdown("</div>", unsafe_allow_html=True)
-        st.write("")
-        st.markdown("<div class='glass'>", unsafe_allow_html=True)
-        st.subheader("Datos del participante")
-        n = st.text_input("Nombre y Apellido", value=st.session_state.user.get('nombre',''))
-        e = st.text_input("Edad (opcional)", value=st.session_state.user.get('edad',''))
-        ed = st.text_input("Educación / Cargo (opcional)", value=st.session_state.user.get('educacion',''))
-        st.session_state.user = {"nombre": n, "edad": e, "educacion": ed}
-        st.markdown("—")
-        st.checkbox("Confirmo que realizo esta prueba voluntariamente y con fines informativos.", key="consent", value=True)
-        if st.button("🚀 Comenzar", use_container_width=True, type="primary"):
-            StateManager.go_test()
-        st.markdown("</div>", unsafe_allow_html=True)
-    with colB:
-        st.markdown("<div class='glass'>", unsafe_allow_html=True)
-        st.subheader("Resumen del Test")
-        c1, c2, c3 = st.columns(3)
-        with c1: st.markdown("<div class='kpi'><h2>60</h2><p>Preguntas</p></div>", unsafe_allow_html=True)
-        with c2: st.markdown("<div class='kpi'><h2>20–35 min</h2><p>Duración típica</p></div>", unsafe_allow_html=True)
-        with c3: st.markdown("<div class='kpi'><h2>3×3</h2><p>Matriz visual</p></div>", unsafe_allow_html=True)
-        st.caption("Las imágenes se generan y cachean en disco para acelerar ejecuciones posteriores.")
-        st.markdown("</div>", unsafe_allow_html=True)
+    with c2:
+        st.markdown(
+            """
+            <div class="card">
+              <h3 style="margin-top:0">Cómo funciona</h3>
+              <ol style="line-height:1.6">
+                <li>Ves 1 pregunta por pantalla con la celda faltante.</li>
+                <li>Elige la alternativa (A–H). <b>Al elegir, avanzas automáticamente</b>.</li>
+                <li>Al final, resultados con KPIs, gauge, % de acierto por dificultad y descarga de informe.</li>
+              </ol>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if st.button("🚀 Iniciar evaluación", type="primary", use_container_width=True):
+            st.session_state.stage = "test"
+            st.session_state.q_idx = 0
+            st.session_state.answers = {}
+            st.session_state.fecha = None
+            st.session_state.timer = time.time()
+            st.rerun()
 
 
-def vista_test_activo():
-    if st.session_state.navigation_flag:
-        st.session_state.navigation_flag = False
+def view_test():
+    i = st.session_state.q_idx
+    bank = st.session_state.item_bank
+    total = len(bank)
+    if i >= total:
+        st.session_state.stage = "resultados"
+        st.session_state.fecha = datetime.now().strftime("%d/%m/%Y %H:%M")
         st.rerun()
-    forzar_scroll_al_top()
-    barra_progreso()
-
-    idx = st.session_state.q_idx
-    total = len(st.session_state.item_bank)
-    if idx >= total:
-        StateManager.to_results()
         return
 
-    item = st.session_state.item_bank[idx]
-    st.write("")
-    st.markdown("<div class='glass'>", unsafe_allow_html=True)
-    st.markdown(f"### Pregunta {idx+1} de {total}")
-    st.caption("Observa la matriz y elige la alternativa correcta (A–H).")
-    col1, col2 = st.columns([1.2, 1])
+    item = bank[i]
+    p = (i+1)/total
+    st.progress(p, text=f"Progreso: {i+1}/{total}")
+
+    st.markdown(f"<div class='dim-title'>Matriz {i+1} de {total}</div>", unsafe_allow_html=True)
+    st.markdown("<div class='dim-desc'>Selecciona la alternativa que completa la matriz (celda inferior derecha).</div>", unsafe_allow_html=True)
+    st.markdown("---")
+
+    st.markdown("<div class='card'>", unsafe_allow_html=True)
+    col1, col2 = st.columns([1.25,1])
     with col1:
-        st.image(item['stem'], use_column_width=True, caption="Matriz 3×3 (celda inferior derecha faltante)")
+        st.image(item["stem"], use_column_width=True, caption="Matriz 3×3")
     with col2:
-        st.markdown("#### Alternativas")
+        st.markdown("**Alternativas (A–H)**")
         labels = list("ABCDEFGH")
         cols = st.columns(2)
         clicks = []
-        for i, pth in enumerate(item['options']):
-            with cols[i % 2]:
+        for j, pth in enumerate(item["options"]):
+            with cols[j % 2]:
                 st.image(pth, use_column_width=True)
-                clicks.append(st.button(f"Elegir {labels[i]}", key=f"btn_{idx}_{i}", use_container_width=True))
+                clicks.append(st.button(f"Elegir {labels[j]}", key=f"btn_{i}_{j}", use_container_width=True))
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # Registro de respuesta
-    for i, clk in enumerate(clicks):
+    # Registrar y auto-avanzar
+    for j, clk in enumerate(clicks):
         if clk:
             rt = time.time() - st.session_state.timer
-            is_correct = (i == item['correct'])
-            st.session_state.answers[idx] = {
-                'choice': i,
-                'correct': bool(is_correct),
-                'rt': round(rt,3),
-                'difficulty': item.get('difficulty', 0.5),
+            is_ok = (j == item["correct"])\
+
+            st.session_state.answers[i] = {
+                "choice": j,
+                "correct": bool(is_ok),
+                "rt": round(rt,3),
+                "difficulty": item.get("difficulty", 0.5),
             }
-            if idx+1 >= total:
-                StateManager.to_results()
-            else:
-                StateManager.next_question()
+            st.session_state.q_idx = i + 1
+            st.session_state.timer = time.time()
+            st.rerun()
             return
 
     # Controles inferiores
-    cA, cB, cC = st.columns([1,1,1])
+    cA, cB = st.columns(2)
     with cA:
         if st.button("⏭️ Omitir", use_container_width=True):
             rt = time.time() - st.session_state.timer
-            st.session_state.answers[idx] = {'choice': None, 'correct': False, 'rt': round(rt,3), 'difficulty': item.get('difficulty',0.5)}
-            StateManager.next_question()
+            st.session_state.answers[i] = {"choice": None, "correct": False, "rt": round(rt,3), "difficulty": item.get("difficulty",0.5)}
+            st.session_state.q_idx = i + 1
+            st.session_state.timer = time.time()
+            st.rerun()
     with cB:
         if st.button("⏹️ Finalizar ahora", use_container_width=True):
-            StateManager.to_results()
-    with cC:
-        st.write("")
-
-
-def vista_resultados():
-    st.markdown("<div class='glass'>", unsafe_allow_html=True)
-    st.markdown("<div class='hero-title'>Informe de resultados</div>", unsafe_allow_html=True)
-    st.caption("Percentil estimado de forma referencial para visualización.")
-
-    scores = compute_score(st.session_state.answers)
-    level, summary, recs = narrative_from_score(scores)
-
-    c1, c2, c3 = st.columns(3)
-    with c1: st.markdown(f"<div class='kpi'><h2>{scores['correct']}/{scores['total']}</h2><p>Aciertos</p></div>", unsafe_allow_html=True)
-    with c2: st.markdown(f"<div class='kpi'><h2>{int(scores['raw_pct']*100)}%</h2><p>Precisión</p></div>", unsafe_allow_html=True)
-    with c3: st.markdown(f"<div class='kpi'><h2>{scores['percentile_est']}</h2><p>Percentil (est.)</p></div>", unsafe_allow_html=True)
-
-    fig = go.Figure(go.Indicator(mode='gauge+number', value=scores['percentile_est'], title={'text':'Percentil estimado'}, gauge={'axis':{'range':[None,100]}, 'bar':{'thickness':0.3}}))
-    st.plotly_chart(fig, use_container_width=True)
-
-    st.subheader(f"Perfil: {level}")
-    st.write(summary)
-    st.markdown("**Recomendaciones**")
-    for r in recs:
-        st.markdown(f"- {r}")
-
-    with st.expander("Ver detalle de respuestas"):
-        labels = list("ABCDEFGH")
-        rows = []
-        for i in range(scores['total']):
-            v = st.session_state.answers.get(i)
-            if v is None:
-                rows.append([i+1, '—', '—', '—'])
-            else:
-                ch = v.get('choice')
-                rows.append([i+1, '-' if ch is None else labels[ch], 'Sí' if v.get('correct') else 'No', v.get('rt')])
-        st.dataframe(rows, use_container_width=True, hide_index=True, column_config={
-            0: st.column_config.NumberColumn("Ítem"),
-            1: st.column_config.TextColumn("Respuesta"),
-            2: st.column_config.TextColumn("Correcto"),
-            3: st.column_config.NumberColumn("RT (s)")
-        })
-
-    colx, coly = st.columns(2)
-    with colx:
-        if st.button("🔁 Rehacer", use_container_width=True):
-            st.session_state.q_idx = 0
-            st.session_state.answers = {}
-            st.session_state.stage = 'inicio'
+            st.session_state.stage = "resultados"
+            st.session_state.fecha = datetime.now().strftime("%d/%m/%Y %H:%M")
             st.rerun()
-    with coly:
-        pdf_bytes = build_pdf(st.session_state.user, scores, st.session_state.answers, st.session_state.start_ts)
-        if pdf_bytes:
-            fname = f"Informe_Raven_{st.session_state.user.get('nombre','Participante').replace(' ','_')}.pdf"
-            st.download_button("⬇️ Descargar PDF", pdf_bytes, file_name=fname, mime="application/pdf", use_container_width=True)
-        else:
-            st.info("Para exportar PDF instala: pip install fpdf")
 
-    st.markdown("</div>", unsafe_allow_html=True)
 
-# ------------------ MAIN (Big Five style) --------------------
+def view_resultados():
+    scores = compute_raven_scores(st.session_state.answers)
+    lvl, txt, recs = raven_narrative(scores)
 
-def main():
-    """Función principal con estructura tipo 'Big Five'."""
-    StateManager.initialize()
-
-    # Manejo de navegación sin st.rerun() en callbacks encadenados
-    if st.session_state.navigation_flag:
-        st.session_state.navigation_flag = False
-        st.rerun()
-
-    if st.session_state.stage == 'inicio':
-        vista_inicio()
-    elif st.session_state.stage == 'test_activo':
-        vista_test_activo()
-    elif st.session_state.stage == 'resultados':
-        vista_resultados()
-
-    st.markdown("---")
+    # Encabezado
     st.markdown(
-        """
-        <p style='text-align:center; font-size:12px; color:#94a3b8;'>
-            🧩 Test Matricial (estilo Raven) – Simulación original para fines educativos/ocupacionales.<br>
-            Los resultados son referenciales y no constituyen evaluación psicométrica clínica.<br>
-            © 2025 – Streamlit • Arquitectura tipo Big Five
-        </p>
+        f"""
+        <div class="card">
+          <h1 style="margin:0 0 6px 0; font-size:clamp(2.2rem,3.8vw,3rem); font-weight:900;">📊 Informe – Test Matricial (estilo Raven)</h1>
+          <p class="small" style="margin:0;">Fecha: <b>{st.session_state.fecha}</b></p>
+        </div>
         """,
         unsafe_allow_html=True,
     )
 
-if __name__ == '__main__':
-    main()
+    # KPIs
+    prec = scores['raw_pct']*100
+    st.markdown("<div class='kpi-grid'>", unsafe_allow_html=True)
+    st.markdown(f"<div class='kpi'><div class='label'>Aciertos</div><div class='value'>{scores['correct']}/{scores['total']}</div></div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='kpi'><div class='label'>Precisión</div><div class='value'>{prec:.1f}%</div></div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='kpi'><div class='label'>Tiempo medio por ítem</div><div class='value'>{scores['avg_rt']:.1f} s</div></div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='kpi'><div class='label'>Percentil estimado (ref.)</div><div class='value'>{scores['percentile_est']}</div></div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # Gauges
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("🎯 Precisión")
+        st.plotly_chart(gauge_plotly(prec, title="Precisión"), use_container_width=True)
+    with c2:
+        st.subheader("🏁 Percentil (referencial)")
+        st.plotly_chart(gauge_plotly(scores['percentile_est'], title="Percentil (ref.)"), use_container_width=True)
+
+    st.markdown("---")
+    st.subheader("📊 % de acierto por dificultad")
+    st.plotly_chart(plot_by_difficulty(scores), use_container_width=True)
+
+    st.markdown("---")
+    st.subheader(f"📝 Interpretación: {lvl}")
+    with st.container():
+        st.markdown("<div class='dim-card'>", unsafe_allow_html=True)
+        st.markdown("<div class='dim-card-header pastel-R'><div class='dim-chip'>🧠 Razonamiento</div><div class='dim-title-row' style='flex:1;'><h3 class='dim-title-name' style='margin:0;'>Perfil global</h3><div class='tag'>"+lvl+"</div></div></div>", unsafe_allow_html=True)
+        st.markdown("<div class='dim-body'><div class='dim-grid'><div class='dim-section'><h4>Resumen</h4><p class='small'>"+txt+"</p></div><div class='dim-section'><h4>Recomendaciones</h4>"+"".join([f"<p class='small'>• {r}</p>" for r in recs])+"</div></div></div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("---")
+    st.subheader("📥 Exportar informe")
+    if HAS_MPL:
+        pdf_bytes = build_pdf(scores, st.session_state.fecha, st.session_state.answers)
+        st.download_button(
+            "⬇️ Descargar PDF",
+            data=pdf_bytes,
+            file_name="Informe_Raven.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+            type="primary",
+        )
+    else:
+        html_bytes = build_html(scores, st.session_state.fecha, st.session_state.answers)
+        st.download_button(
+            "⬇️ Descargar Reporte (HTML) — Imprime como PDF",
+            data=html_bytes,
+            file_name="Informe_Raven.html",
+            mime="text/html",
+            use_container_width=True,
+            type="primary",
+        )
+        st.caption("Instala matplotlib para obtener el PDF directo con gauges: `pip install matplotlib`.")
+
+    st.markdown("---")
+    if st.button("🔄 Nueva evaluación", type="primary", use_container_width=True):
+        st.session_state.stage = "inicio"
+        st.session_state.q_idx = 0
+        st.session_state.answers = {}
+        st.session_state.fecha = None
+        st.session_state.timer = time.time()
+        st.rerun()
+
+# -------------------------------------------------------------------------------------------------
+# FLUJO PRINCIPAL (igual patrón que el Big Five de referencia)
+# -------------------------------------------------------------------------------------------------
+if st.session_state.stage == "inicio":
+    view_inicio()
+elif st.session_state.stage == "test":
+    view_test()
+else:
+    if st.session_state.fecha is None:
+        st.session_state.fecha = datetime.now().strftime("%d/%m/%Y %H:%M")
+    view_resultados()
+
+# Rerun final (si lo llegáramos a usar con radio; aquí se usa con botones, pero mantenemos patrón)
+if st.session_state._needs_rerun:
+    st.session_state._needs_rerun = False
+    st.rerun()

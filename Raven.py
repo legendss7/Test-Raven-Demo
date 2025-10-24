@@ -1,260 +1,282 @@
 # app.py
-# ---------------------------------------------------------
-# Test de Raven - App liviana, profesional y escalable
-# Autor: tú :)
-# Requisitos: streamlit, pillow, requests, pandas
-# pip install streamlit pillow requests pandas
-# ---------------------------------------------------------
-
+# ------------------------------------------------------------
+# Matrices lógicas minimalistas (estilo Raven) con miniaturas
+# Requisitos: pip install streamlit pillow
+# ------------------------------------------------------------
 import streamlit as st
+from PIL import Image, ImageDraw
 from io import BytesIO
-from PIL import Image
-import requests
-import pandas as pd
+import random
+import math
 from datetime import datetime
 
-st.set_page_config(
-    page_title="Test de Raven - Demo",
-    layout="centered",
-    page_icon="🧠",
-    initial_sidebar_state="collapsed",
-)
-
-# ---------------------- Configuración ----------------------
+st.set_page_config(page_title="Matrices Lógicas Minimal", layout="wide")
 
 TOTAL_ITEMS = 60
-OPTIONS = ["A", "B", "C", "D", "E", "F", "G", "H"]
+OPTIONS = list("ABCDEFGH")
 
-# Genera URLs RAW directas a tu repo (no uses /blob/)
-def build_image_url(i: int) -> str:
-    return f"https://raw.githubusercontent.com/legendss7/Test-Raven-Demo/main/raven_pagina_{i:03}.png"
+# ------------------ GENERADOR DE ÍTEMS (PROCEDURAL) ------------------
+# Cada celda es un vector de 3 atributos:
+#  - shape: 0=círculo, 1=cuadrado, 2=triángulo
+#  - fill : 0=contorno, 1=relleno
+#  - rot  : 0, 45, 90, 135 (solo visible para triángulo)
+#
+# Regla base en cada fila: v3 = (v1 + v2) mod base (componente a componente)
+# La celda faltante es la (2,2) (fila3, col3). Se generan distractores cercanos.
+#
+CANVAS = 360           # tamaño del tablero grande
+THUMB  = 160           # tamaño de miniatura
+MARGIN = 20
+GRID   = 3
 
-# Cachea la descarga de imágenes por URL
-@st.cache_data(show_spinner=False, max_entries=256)
-def fetch_image_bytes(url: str) -> bytes:
-    r = requests.get(url, timeout=10)
-    r.raise_for_status()
-    return r.content
+def _rnd(seed):
+    rnd = random.Random(seed)
+    return rnd
 
-# Utilidad: forzar scroll al top tras cada avance
-def scroll_to_top():
-    # NOTA: evitar f-strings para no chocar con llaves JS
-    js_code = """
-    <script>
-        setTimeout(function(){
-            try {
-                window.parent.scrollTo({ top: 0, behavior: 'auto' });
-                var mainContent = window.parent.document.querySelector('[data-testid="stAppViewContainer"]');
-                if (mainContent) {
-                    mainContent.scrollTo({ top: 0, behavior: 'auto' });
-                }
-            } catch(e) {}
-        }, 120);
-    </script>
-    """
-    st.components.v1.html(js_code, height=0, scrolling=False)
+def draw_shape(draw: ImageDraw.Draw, cx, cy, size, shape, fill, rot):
+    # colores
+    fg = (0, 0, 0)
+    bg = (255, 255, 255)
+    w = max(2, size // 18)  # grosor
 
-# ---------------------- Estado Global ----------------------
+    x0, y0 = cx - size//2, cy - size//2
+    x1, y1 = cx + size//2, cy + size//2
 
-if "stage" not in st.session_state:
-    st.session_state.stage = "inicio"  # inicio | test | resultados
-
-if "idx" not in st.session_state:
-    st.session_state.idx = 0  # 0..59
-
-if "responses" not in st.session_state:
-    # dict: { index (0-based): "A".."H" }
-    st.session_state.responses = {}
-
-if "start_ts" not in st.session_state:
-    st.session_state.start_ts = None
-
-# ---------------------- Callbacks ----------------------
-
-def cb_select_option():
-    """Se dispara al elegir alternativa: guarda => avanza => resultados al final."""
-    i = st.session_state.idx
-    key = f"resp_{i}"
-    selected = st.session_state.get(key, None)
-    if selected is not None:
-        st.session_state.responses[i] = selected
-
-        # Avanzar
-        if i < TOTAL_ITEMS - 1:
-            st.session_state.idx = i + 1
-            scroll_to_top()
-            st.rerun()
+    if shape == 0:  # círculo
+        if fill:
+            draw.ellipse([x0, y0, x1, y1], outline=fg, fill=fg, width=w)
         else:
-            st.session_state.stage = "resultados"
-            st.rerun()
+            draw.ellipse([x0, y0, x1, y1], outline=fg, width=w)
 
-def cb_start_test():
-    st.session_state.stage = "test"
-    st.session_state.idx = 0
-    st.session_state.responses = {}
-    st.session_state.start_ts = datetime.now().isoformat()
-    st.rerun()
+    elif shape == 1:  # cuadrado
+        if fill:
+            draw.rectangle([x0, y0, x1, y1], outline=fg, fill=fg, width=w)
+        else:
+            draw.rectangle([x0, y0, x1, y1], outline=fg, width=w)
 
-def cb_restart():
-    for k in list(st.session_state.keys()):
-        if k.startswith("resp_"):
-            del st.session_state[k]
-    st.session_state.idx = 0
-    st.session_state.responses = {}
-    st.session_state.stage = "inicio"
-    st.rerun()
+    else:  # triángulo (rot admite 0,45,90,135 => 0..3)
+        # triángulo isósceles rotado en 90° * k + 45° * m (m=0 o 1)
+        import math as _m
+        angle = [0, 45, 90, 135][rot] * _m.pi / 180.0
+        r = size * 0.52
+        pts = []
+        for j in range(3):
+            a = angle + 2 * _m.pi * j / 3
+            pts.append((cx + r * _m.cos(a), cy + r * _m.sin(a)))
+        if fill:
+            draw.polygon(pts, outline=fg, fill=fg)
+        else:
+            draw.polygon(pts, outline=fg)
 
-# ---------------------- Vistas ----------------------
+def render_board(cells, missing=(2, 2), size=CANVAS, show_qmark=True):
+    img = Image.new("RGB", (size, size), "white")
+    d = ImageDraw.Draw(img)
+    gap = MARGIN
+    cell = (size - 2 * gap) // GRID
+    # líneas de la grilla
+    fg = (0, 0, 0)
+    for i in range(1, GRID):
+        d.line([(gap, gap + i*cell), (size-gap, gap + i*cell)], fill=fg, width=1)
+        d.line([(gap + i*cell, gap), (gap + i*cell, size-gap)], fill=fg, width=1)
+    # borde
+    d.rectangle([gap, gap, size-gap, size-gap], outline=fg, width=1)
 
-def vista_inicio():
-    st.title("🧠 Test de Matrices Progresivas (Raven) – Demo")
-    st.markdown(
-        """
-**Objetivo**: presentar ítems tipo matriz (1 a 60), registrar respuesta por alternativa **A–H** y entregar un resumen final.
+    # dibujar shapes
+    for r in range(GRID):
+        for c in range(GRID):
+            if (r, c) == missing:
+                if show_qmark:
+                    # signo ? minimalista
+                    cx = gap + c*cell + cell//2
+                    cy = gap + r*cell + cell//2
+                    s = int(cell*0.45)
+                    d.text((cx-8, cy-18), "?", fill=fg)
+                continue
+            shape, fill, rot = cells[r][c]
+            cx = gap + c*cell + cell//2
+            cy = gap + r*cell + cell//2
+            size_shape = int(cell*0.62)
+            draw_shape(d, cx, cy, size_shape, shape, fill, rot)
+    return img
 
-**Notas importantes**  
-- Las imágenes se leen **directamente** desde tu repositorio GitHub (raw) para máxima ligereza.  
-- Para un resultado “100% confiable” necesitas **cargar la clave de respuestas** (CSV) que **tú** provees.  
-- Esta app **no incluye** la clave ni normas por temas de derechos.  
-- Puedes exportar las respuestas en CSV y calcular métricas adicionales si lo deseas.
-        """.strip()
-    )
-    st.button("Comenzar", type="primary", use_container_width=True, on_click=cb_start_test)
+def vec_add(v1, v2):
+    s = ( (v1[0]+v2[0])%3, (v1[1]+v2[1])%2, (v1[2]+v2[2])%4 )
+    return s
 
-    with st.expander("⚙️ Configuración técnica"):
-        st.code(
-            "Repo esperado: https://github.com/legendss7/Test-Raven-Demo\n"
-            "Imágenes: raven_pagina_001.png ... raven_pagina_060.png\n"
-            "URL RAW: https://raw.githubusercontent.com/legendss7/Test-Raven-Demo/main/raven_pagina_001.png",
-            language="text"
-        )
-
-
-def vista_test():
-    i = st.session_state.idx
-    n_display = i + 1
-    progress = (n_display) / TOTAL_ITEMS
-
-    st.markdown(f"#### Ítem {n_display} de {TOTAL_ITEMS}")
-    st.progress(progress)
-
-    # Cargar imagen actual (on-demand)
-    url = build_image_url(n_display)
-    try:
-        img_bytes = fetch_image_bytes(url)
-        img = Image.open(BytesIO(img_bytes))
-        st.image(img, use_container_width=True, caption=f"Ítem {n_display}")
-    except Exception as e:
-        st.error(f"No se pudo cargar la imagen del ítem {n_display}. Verifica el nombre/URL.\n{e}")
-
-    st.markdown("**Selecciona la alternativa correcta:**")
-
-    # Valor actual si ya respondió
-    prefill = st.session_state.responses.get(i, None)
-
-    # Radio con callback de auto-avance
-    st.radio(
-        label="Alternativas",
-        options=OPTIONS,
-        index=OPTIONS.index(prefill) if prefill in OPTIONS else None,
-        horizontal=True,
-        key=f"resp_{i}",
-        on_change=cb_select_option,
-    )
-
-    # Ayudas visuales
-    with st.expander("Ver respuestas registradas", expanded=False):
-        if st.session_state.responses:
-            df_prev = pd.DataFrame(
-                [{"Ítem": k + 1, "Respuesta": v} for k, v in sorted(st.session_state.responses.items())]
+def make_item(seed: int):
+    rnd = _rnd(seed)
+    # base aleatoria para las dos primeras celdas de cada fila
+    # fila 0..2, col 0..1 definidas; col2 se calcula; fila2,col2 será missing
+    cells = [[None]*3 for _ in range(3)]
+    for r in range(3):
+        for c in range(2):
+            cells[r][c] = (
+                rnd.randrange(0, 3),  # shape
+                rnd.randrange(0, 2),  # fill
+                rnd.randrange(0, 4),  # rot
             )
-            st.dataframe(df_prev, use_container_width=True, hide_index=True)
+        cells[r][2] = vec_add(cells[r][0], cells[r][1])
+
+    # ahora aplicamos coherencia por columnas sutil:
+    # ajustar primera columna con una suma fija para dificultad
+    adj = (rnd.randrange(0,3), rnd.randrange(0,2), rnd.randrange(0,4))
+    for r in range(3):
+        cells[r][0] = vec_add(cells[r][0], adj)
+        cells[r][1] = cells[r][1]  # sin cambio
+        cells[r][2] = vec_add(cells[r][2], adj)
+
+    # respuesta correcta = valor en (2,2)
+    correct = cells[2][2]
+
+    # quitar (2,2) para el tablero con ?
+    board = [row[:] for row in cells]
+    board[2][2] = None
+
+    # generar 7 distractores cercanos
+    def mutate(v):
+        s,f,t = v
+        choice = rnd.choice([0,1,2])
+        if choice == 0: s = (s + rnd.choice([1,2])) % 3
+        elif choice == 1: f = 1 - f
+        else: t = (t + rnd.choice([1,2])) % 4
+        return (s,f,t)
+
+    opts = [correct]
+    while len(opts) < 8:
+        cand = mutate(correct)
+        if cand not in opts:
+            opts.append(cand)
+    rnd.shuffle(opts)
+    correct_idx = opts.index(correct)
+
+    # render opciones en imágenes (cuadros individuales)
+    opt_imgs = []
+    opt_size = 160
+    for v in opts:
+        im = Image.new("RGB", (opt_size, opt_size), "white")
+        d = ImageDraw.Draw(im)
+        s = int(opt_size*0.65)
+        draw_shape(d, opt_size//2, opt_size//2, s, v[0], v[1], v[2])
+        d.rectangle([4,4,opt_size-4,opt_size-4], outline=(0,0,0), width=1)
+        opt_imgs.append(im)
+
+    # render tablero grande y miniatura
+    board_big = render_board(board, missing=(2,2), size=CANVAS, show_qmark=True)
+    board_thumb = board_big.copy()
+    board_thumb.thumbnail((THUMB, THUMB))
+
+    return board_big, board_thumb, opt_imgs, correct_idx
+
+# caches
+@st.cache_data(show_spinner=False, max_entries=256)
+def get_item_assets(idx: int):
+    # idx es 0..59; seed fijo para reproducibilidad
+    seed = 10_000 + idx
+    board_big, board_thumb, opt_imgs, correct_idx = make_item(seed)
+    # devolver bytes (para que el cache sea más liviano)
+    def to_bytes(pil_img):
+        b = BytesIO(); pil_img.save(b, format="PNG", optimize=True); return b.getvalue()
+    return to_bytes(board_big), to_bytes(board_thumb), [to_bytes(x) for x in opt_imgs], correct_idx
+
+# ------------------ ESTADO ------------------
+if "idx" not in st.session_state: st.session_state.idx = 0
+if "resp" not in st.session_state: st.session_state.resp = {}   # {i: 0..7}
+if "score" not in st.session_state: st.session_state.score = 0
+if "start_ts" not in st.session_state: st.session_state.start_ts = datetime.now().isoformat()
+
+def goto(i: int):
+    st.session_state.idx = i
+
+def pick_option(i: int, k: int, correct_idx: int):
+    st.session_state.resp[i] = k
+    if k == correct_idx:
+        # nota: si cambia la respuesta, recalculamos al finalizar
+        pass
+    # auto-avance
+    if i < TOTAL_ITEMS-1:
+        st.session_state.idx = i+1
+        st.rerun()
+    else:
+        st.session_state.view = "resultados"
+        st.rerun()
+
+# ------------------ UI MINIMAL ------------------
+if "view" not in st.session_state: st.session_state.view = "test"
+
+# barra superior: miniaturas clicables (muy sobrio)
+with st.container():
+    cols = st.columns(6, gap="small")
+    for i in range(TOTAL_ITEMS):
+        big, thumb, _, _ = get_item_assets(i)
+        with cols[i % 6]:
+            st.image(thumb, use_container_width=True, caption=str(i+1))
+            st.button(f"{i+1}", key=f"goto_{i}", on_click=goto, args=(i,))
+
+st.divider()
+
+if st.session_state.view == "test":
+    i = st.session_state.idx
+    big, _, opt_imgs, correct_idx = get_item_assets(i)
+
+    # panel principal: tablero + opciones A–H
+    left, right = st.columns([2, 3], gap="large")
+    with left:
+        st.markdown(f"**Ítem {i+1}/{TOTAL_ITEMS}**")
+        st.image(big, use_container_width=True)
+
+    with right:
+        st.markdown("**Elige la alternativa que completa la matriz**")
+        # mostrar opciones en grilla minimal (4x2)
+        rows = 4; cols = 2
+        k = 0
+        for r in range(rows):
+            cs = st.columns(cols, gap="small")
+            for c in range(cols):
+                if k >= 8: break
+                with cs[c]:
+                    st.image(opt_imgs[k], use_container_width=True, caption=OPTIONS[k])
+                    st.button(f"Elegir {OPTIONS[k]}",
+                              key=f"pick_{i}_{k}",
+                              on_click=pick_option,
+                              args=(i, k, correct_idx))
+                k += 1
+
+        # marca de lo ya respondido
+        if i in st.session_state.resp:
+            st.caption(f"Seleccionaste: **{OPTIONS[st.session_state.resp[i]]}**")
         else:
-            st.info("Aún no hay respuestas registradas.")
+            st.caption("Selecciona una opción para continuar →")
 
-    st.caption("Al elegir una alternativa, pasarás automáticamente al siguiente ítem.")
+        # botón finalizar visible sólo al final
+        if i == TOTAL_ITEMS-1:
+            if st.button("Finalizar", type="primary"):
+                st.session_state.view = "resultados"
+                st.rerun()
 
-def vista_resultados():
-    st.success("¡Has completado el test!")
-    end_ts = datetime.now().isoformat()
-
-    # Construir DataFrame de respuestas
+elif st.session_state.view == "resultados":
+    # recomputar score
+    correct = 0
     data = []
     for i in range(TOTAL_ITEMS):
-        data.append({
-            "item": i + 1,
-            "respuesta": st.session_state.responses.get(i, None)
-        })
-    df_resp = pd.DataFrame(data)
+        _, _, _, correct_idx = get_item_assets(i)
+        sel = st.session_state.resp.get(i, None)
+        ok = (sel == correct_idx)
+        correct += int(ok)
+        data.append({"item": i+1, "respuesta": OPTIONS[sel] if sel is not None else None,
+                     "correcta": OPTIONS[correct_idx], "acierto": ok})
 
-    st.subheader("Resumen de respuestas")
-    st.dataframe(df_resp, use_container_width=True, hide_index=True)
+    st.markdown("### Resultado")
+    st.metric("Aciertos", f"{correct} / {TOTAL_ITEMS}")
+    st.dataframe(data, use_container_width=True, hide_index=True)
 
-    # Carga opcional de clave de corrección (CSV)
-    st.markdown("### ✅ (Opcional) Cargar clave de respuestas")
-    st.caption(
-        "Sube un CSV con columnas: **item** (1..60) y **correcta** (A..H). "
-        "Ejemplo de filas: `1,A` `2,D` …"
-    )
-    key_file = st.file_uploader("Clave de respuestas (CSV)", type=["csv"])
+    # exportar CSV
+    import pandas as pd
+    df = pd.DataFrame(data)
+    csv = df.to_csv(index=False).encode("utf-8")
+    st.download_button("Descargar CSV", data=csv,
+                       file_name=f"matrices_minimal_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                       mime="text/csv")
 
-    total_correct = None
-    if key_file is not None:
-        try:
-            key_df = pd.read_csv(key_file)
-            # Normalización básica
-            key_df["item"] = key_df["item"].astype(int)
-            key_df["correcta"] = key_df["correcta"].str.strip().str.upper()
-
-            merged = df_resp.merge(key_df, on="item", how="left")
-            merged["correcto"] = merged["respuesta"].str.upper() == merged["correcta"]
-            total_correct = int(merged["correcto"].sum())
-
-            st.subheader("Resultados")
-            st.metric(label="Aciertos (puntaje directo)", value=f"{total_correct} / {TOTAL_ITEMS}")
-
-            with st.expander("Detalle de corrección"):
-                st.dataframe(merged, use_container_width=True, hide_index=True)
-
-            st.caption(
-                "Para percentiles o equivalencias normativas se requiere una tabla de normas por edad/forma (no incluida)."
-            )
-        except Exception as e:
-            st.error(f"Error al procesar la clave: {e}")
-
-    # Exportar CSV con respuestas
-    st.markdown("### 📥 Exportar respuestas")
-    csv_bytes = df_resp.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        label="Descargar respuestas (CSV)",
-        data=csv_bytes,
-        file_name=f"raven_respuestas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-        mime="text/csv",
-        use_container_width=True
-    )
-
-    # Metadatos
-    st.markdown("### Metadatos")
-    st.json(
-        {
-            "inicio": st.session_state.start_ts,
-            "fin": end_ts,
-            "total_items": TOTAL_ITEMS,
-            "total_respondidos": int(df_resp["respuesta"].notna().sum()),
-            "aciertos": total_correct if total_correct is not None else "—"
-        }
-    )
-
-    st.button("🔁 Reiniciar", use_container_width=True, on_click=cb_restart)
-
-# ---------------------- Router ----------------------
-
-if st.session_state.stage == "inicio":
-    vista_inicio()
-elif st.session_state.stage == "test":
-    vista_test()
-elif st.session_state.stage == "resultados":
-    vista_resultados()
-else:
-    st.session_state.stage = "inicio"
-    st.rerun()
+    if st.button("Reiniciar"):
+        st.session_state.clear()
+        st.rerun()

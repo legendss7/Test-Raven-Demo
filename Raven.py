@@ -22,6 +22,8 @@ import plotly.graph_objects as go
 # ---------------------------------------------------------------
 HAS_MPL = False
 try:
+    import matplotlib
+    matplotlib.use('Agg')  # Backend no-GUI
     import matplotlib.pyplot as plt
     from matplotlib.backends.backend_pdf import PdfPages
     from matplotlib.patches import FancyBboxPatch
@@ -114,18 +116,14 @@ html, body, [data-testid="stAppViewContainer"]{
   display:grid; grid-template-columns: repeat(auto-fit, minmax(60px,1fr));
   gap:8px; margin-top:12px;
 }
-.opt{
-  border:1px solid #eee; border-radius:12px; background:#fff; padding:10px;
-  text-align:center; cursor:pointer; transition: transform .06s ease;
-}
-.opt:hover{ transform: translateY(-1px); }
-.opt.selected{ outline:2px solid #111; }
-
-/* Tabla */
-[data-testid="stDataFrame"] div[role="grid"]{ font-size:0.95rem; }
 
 .small{ font-size:0.95rem; opacity:.9; }
 hr{ border:none; border-top:1px solid #eee; margin:16px 0; }
+
+/* Botones mejorados */
+div[data-testid="stButton"] button {
+    transition: all 0.2s ease;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -146,24 +144,30 @@ ANSWER_KEY: Dict[str, Dict[int, int]] = {
     "E": {1:4, 2:7, 3:5, 4:2, 5:8, 6:1, 7:6, 8:3, 9:7, 10:2},
     "F": {1:6, 2:1, 3:8, 4:5, 5:4, 6:2, 7:3, 8:8, 9:1, 10:6},
 }
-# Nota: valida con tu versión de Raven; si cambian, ajusta aquí.
 
 
 # ---------------------------------------------------------------
 # ESTADO
 # ---------------------------------------------------------------
-if "stage" not in st.session_state: st.session_state.stage = "inicio"  # inicio | test | resultados
-if "q_idx" not in st.session_state: st.session_state.q_idx = 0
-if "answers" not in st.session_state: st.session_state.answers = {}  # item_id -> int (1..n)
-if "fecha" not in st.session_state: st.session_state.fecha = None
-if "_needs_rerun" not in st.session_state: st.session_state._needs_rerun = False
+def init_session_state():
+    """Inicializa todas las variables de session_state"""
+    defaults = {
+        "stage": "inicio",
+        "q_idx": 0,
+        "answers": {},
+        "fecha": None,
+        "pdf_url": "",
+        "pdf_path": None,
+        "pdf_pages": 0,
+        "page_map": list(range(60)),
+        "doc_ready": False,
+        "items": None
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
-# Control del PDF remoto/local y cache
-if "pdf_url" not in st.session_state: st.session_state.pdf_url = ""
-if "pdf_path" not in st.session_state: st.session_state.pdf_path = None
-if "pdf_pages" not in st.session_state: st.session_state.pdf_pages = 0
-if "page_map" not in st.session_state: st.session_state.page_map = list(range(60))  # mapea item 0..59 a page_idx
-if "doc_ready" not in st.session_state: st.session_state.doc_ready = False
+init_session_state()
 
 
 # ---------------------------------------------------------------
@@ -184,7 +188,7 @@ def build_manifest() -> List[Dict]:
             })
     return items
 
-if "items" not in st.session_state:
+if st.session_state.items is None:
     st.session_state.items = build_manifest()
 
 
@@ -202,7 +206,8 @@ def download_pdf(url: str) -> Optional[str]:
         with open(dest, "wb") as f:
             f.write(r.content)
         return dest
-    except Exception:
+    except Exception as e:
+        st.error(f"Error descargando PDF: {str(e)}")
         return None
 
 def open_pdf(path: str) -> Optional[int]:
@@ -214,7 +219,8 @@ def open_pdf(path: str) -> Optional[int]:
         n = doc.page_count
         doc.close()
         return n
-    except Exception:
+    except Exception as e:
+        st.error(f"Error abriendo PDF: {str(e)}")
         return None
 
 @st.cache_data(show_spinner=False)
@@ -236,7 +242,8 @@ def render_page_as_image(path: str, page_index: int, dpi: int = 150) -> Optional
         img_bytes = pix.tobytes("png")
         doc.close()
         return img_bytes
-    except Exception:
+    except Exception as e:
+        st.error(f"Error renderizando página: {str(e)}")
         return None
 
 
@@ -257,8 +264,8 @@ def compute_results(answers: Dict[int,int], items: List[Dict]) -> Dict:
     df = pd.DataFrame(rows).sort_values(["serie","index"]).reset_index(drop=True)
     n_answered = df["respuesta"].notna().sum()
     n_with_key = df["correcta"].notna().sum()
-    n_correct = df["acierto"].sum() if df["acierto"].notna().any() else np.nan
-    pct = (n_correct / n_with_key * 100) if (n_with_key and pd.notna(n_correct)) else np.nan
+    n_correct = df["acierto"].sum() if df["acierto"].notna().any() else 0
+    pct = (n_correct / n_with_key * 100) if n_with_key > 0 else 0.0
 
     by_series = (
         df.groupby("serie")
@@ -269,20 +276,19 @@ def compute_results(answers: Dict[int,int], items: List[Dict]) -> Dict:
           .reset_index()
     )
     by_series["% acierto"] = np.where(
-        by_series["con_clave"]>0, (by_series["aciertos"]/by_series["con_clave"])*100, np.nan
+        by_series["con_clave"]>0, (by_series["aciertos"]/by_series["con_clave"])*100, 0.0
     )
 
     # proxy dificultad (posición global A1..F10)
     df["pos_global"] = (df["serie"].map({s:i for i,s in enumerate(SERIES)}))*ITEMS_PER_SERIES + df["index"]
-    df["dificultad"] = df["pos_global"]
 
     return {
         "df": df,
         "totales": {
             "contestados": int(n_answered),
             "con_clave": int(n_with_key),
-            "aciertos": int(n_correct) if pd.notna(n_correct) else None,
-            "porcentaje": float(pct) if pd.notna(pct) else None
+            "aciertos": int(n_correct),
+            "porcentaje": float(pct)
         },
         "series": by_series.sort_values("serie").reset_index(drop=True)
     }
@@ -294,7 +300,8 @@ def compute_results(answers: Dict[int,int], items: List[Dict]) -> Dict:
 def plot_series_bars(by_series: pd.DataFrame):
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        x=by_series["serie"], y=by_series["% acierto"],
+        x=by_series["serie"], 
+        y=by_series["% acierto"],
         text=[f"{x:.1f}%" if pd.notna(x) else "-" for x in by_series["% acierto"]],
         textposition="outside",
         marker=dict(color=["#81B29A","#F2CC8F","#E07A5F","#9C6644","#6D597A","#84A59D"])
@@ -302,7 +309,7 @@ def plot_series_bars(by_series: pd.DataFrame):
     fig.update_layout(
         template="plotly_white",
         height=420,
-        yaxis=dict(title="% acierto", range=[0,100]),
+        yaxis=dict(title="% acierto", range=[0,105]),
         xaxis=dict(title="Serie"),
         margin=dict(l=40, r=40, t=40, b=40)
     )
@@ -318,12 +325,12 @@ def plot_difficulty_curve(df: pd.DataFrame):
         y=tmp["ok"].rolling(5, min_periods=1).mean()*100,
         mode="lines+markers",
         name="Media móvil aciertos (x5)",
-        line=dict(width=2)
+        line=dict(width=2, color="#E07A5F")
     ))
     fig.update_layout(
         template="plotly_white",
         height=420,
-        yaxis=dict(title="% acierto (rolling x5)", range=[0,100]),
+        yaxis=dict(title="% acierto (rolling x5)", range=[0,105]),
         xaxis=dict(title="Progresión (A1 → F10)"),
         margin=dict(l=40, r=40, t=40, b=40)
     )
@@ -335,61 +342,59 @@ def plot_difficulty_curve(df: pd.DataFrame):
 # ---------------------------------------------------------------
 def _pdf_card(ax, x,y,w,h,title,val):
     r = FancyBboxPatch((x,y), w,h, boxstyle="round,pad=0.012,rounding_size=0.018",
-                       edgecolor="#dddddd", facecolor="#ffffff")
+                       edgecolor="#dddddd", facecolor="#ffffff", linewidth=1)
     ax.add_patch(r)
     ax.text(x+w*0.06, y+h*0.60, title, fontsize=10, color="#333")
     ax.text(x+w*0.06, y+h*0.25, f"{val}", fontsize=20, fontweight='bold')
 
 def build_pdf_report(result: Dict, fecha: str) -> bytes:
     df = result["df"]; tot = result["totales"]; bys = result["series"]
-    pct = tot["porcentaje"] if tot["porcentaje"] is not None else 0.0
+    pct = tot["porcentaje"]
 
     buf = BytesIO()
     with PdfPages(buf) as pdf:
-        # KPIs
+        # Página 1: KPIs
         fig = plt.figure(figsize=(8.27,11.69))
         ax = fig.add_axes([0,0,1,1]); ax.axis('off')
+        ax.set_xlim(0, 1); ax.set_ylim(0, 1)
+        
         ax.text(.5,.94,"Informe — Matrices Progresivas de Raven", ha='center', fontsize=20, fontweight='bold')
         ax.text(.5,.91,f"Fecha: {fecha}", ha='center', fontsize=11)
 
         Y0 = .80; H = .10; W = .40; GAP = .02
         _pdf_card(ax, .06, Y0, W, H, "Ítems contestados", str(tot["contestados"]))
         _pdf_card(ax, .54, Y0, W, H, "Ítems con clave", str(tot["con_clave"]))
-        _pdf_card(ax, .06, Y0-(H+GAP), W, H, "Aciertos", str(tot["aciertos"]) if tot["aciertos"] is not None else "—")
+        _pdf_card(ax, .06, Y0-(H+GAP), W, H, "Aciertos", str(tot["aciertos"]))
         _pdf_card(ax, .54, Y0-(H+GAP), W, H, "% Acierto", f"{pct:.1f}%")
 
         ax.text(.5,.58,"Resumen por Series", ha='center', fontsize=14, fontweight='bold')
         ylist = .54
         for _, r in bys.iterrows():
             s = r["serie"]; p = r["% acierto"]
-            ax.text(.12, ylist, f"Serie {s}: {p:.1f}% acierto" if pd.notna(p) else f"Serie {s}: —", fontsize=11)
+            ax.text(.12, ylist, f"Serie {s}: {p:.1f}% acierto", fontsize=11)
             ylist -= 0.03
         pdf.savefig(fig, bbox_inches='tight'); plt.close(fig)
 
-        # Detalle por bloques
-        fig2 = plt.figure(figsize=(8.27,11.69)); ax2 = fig2.add_axes([0,0,1,1]); ax2.axis('off')
-        ax2.text(.5,.96,"Detalle por ítem", ha='center', fontsize=16, fontweight='bold')
+        # Página 2+: Detalle
+        items_per_page = 22
+        for start_idx in range(0, len(df), items_per_page):
+            fig2 = plt.figure(figsize=(8.27,11.69))
+            ax2 = fig2.add_axes([0,0,1,1]); ax2.axis('off')
+            ax2.set_xlim(0, 1); ax2.set_ylim(0, 1)
+            
+            title = "Detalle por ítem" if start_idx == 0 else "Detalle por ítem (cont.)"
+            ax2.text(.5,.96, title, ha='center', fontsize=16, fontweight='bold')
 
-        def draw_block(df_block, y0):
-            yy = y0
-            for _, rr in df_block.iterrows():
+            yy = .90
+            end_idx = min(start_idx + items_per_page, len(df))
+            for _, rr in df.iloc[start_idx:end_idx].iterrows():
                 s = rr["serie"]; k = rr["index"]; a = rr["respuesta"]; c = rr["correcta"]; ok = rr["acierto"]
-                t = f"{s}{k:02d}  —  resp: {a if pd.notna(a) else '—'} · ok: {c if pd.notna(c) else '—'} · {'✔' if ok else '✘' if ok is not None else ' '}"
+                status = '✔' if ok else ('✘' if ok is not None else ' ')
+                t = f"{s}{k:02d}  —  resp: {a if pd.notna(a) else '—'} · ok: {c if pd.notna(c) else '—'} · {status}"
                 ax2.text(.08, yy, t, fontsize=10)
                 yy -= 0.025
-            return yy
 
-        start = 0; ystart = .90
-        while start < len(df):
-            end = min(start+22, len(df))
-            ystart = draw_block(df.iloc[start:end], ystart)
-            start = end
-            if start < len(df):
-                pdf.savefig(fig2, bbox_inches='tight'); plt.close(fig2)
-                fig2 = plt.figure(figsize=(8.27,11.69)); ax2 = fig2.add_axes([0,0,1,1]); ax2.axis('off'); ystart = .90
-                ax2.text(.5,.96,"Detalle por ítem (cont.)", ha='center', fontsize=16, fontweight='bold')
-
-        pdf.savefig(fig2, bbox_inches='tight'); plt.close(fig2)
+            pdf.savefig(fig2, bbox_inches='tight'); plt.close(fig2)
 
     buf.seek(0)
     return buf.read()
@@ -397,12 +402,16 @@ def build_pdf_report(result: Dict, fecha: str) -> bytes:
 def build_html_report(result: Dict, fecha: str) -> bytes:
     df = result["df"]; tot = result["totales"]; bys = result["series"]
     pct = tot["porcentaje"]
+    
     rows = ""
     for _, r in df.iterrows():
-        rows += f"<tr><td>{r['serie']}{r['index']:02d}</td><td>{r['respuesta'] if pd.notna(r['respuesta']) else '—'}</td><td>{r['correcta'] if pd.notna(r['correcta']) else '—'}</td><td>{'✔' if r['acierto'] else ('✘' if r['acierto'] is not None else ' ')}</td></tr>"
+        status = '✔' if r['acierto'] else ('✘' if r['acierto'] is not None else ' ')
+        rows += f"<tr><td>{r['serie']}{r['index']:02d}</td><td>{r['respuesta'] if pd.notna(r['respuesta']) else '—'}</td><td>{r['correcta'] if pd.notna(r['correcta']) else '—'}</td><td>{status}</td></tr>"
+    
     srows = ""
     for _, r in bys.iterrows():
-        srows += f"<tr><td>{r['serie']}</td><td>{r['total']}</td><td>{r['contestados']}</td><td>{r['con_clave']}</td><td>{f'{r['% acierto']:.1f}%' if pd.notna(r['% acierto']) else '—'}</td></tr>"
+        srows += f"<tr><td>{r['serie']}</td><td>{r['total']}</td><td>{r['contestados']}</td><td>{r['con_clave']}</td><td>{r['% acierto']:.1f}%</td></tr>"
+    
     html = f"""<!doctype html>
 <html><head><meta charset="utf-8" />
 <title>Informe Raven</title>
@@ -424,8 +433,8 @@ th,td{{border:1px solid #eee; padding:8px; text-align:left;}}
 <div class="kpi-grid">
   <div class="kpi"><div class="label">Ítems contestados</div><div class="value">{tot["contestados"]}</div></div>
   <div class="kpi"><div class="label">Ítems con clave</div><div class="value">{tot["con_clave"]}</div></div>
-  <div class="kpi"><div class="label">Aciertos</div><div class="value">{tot["aciertos"] if tot["aciertos"] is not None else '—'}</div></div>
-  <div class="kpi"><div class="label">% Acierto</div><div class="value">{f'{pct:.1f}%' if pct else '—'}</div></div>
+  <div class="kpi"><div class="label">Aciertos</div><div class="value">{tot["aciertos"]}</div></div>
+  <div class="kpi"><div class="label">% Acierto</div><div class="value">{pct:.1f}%</div></div>
 </div>
 
 <h3>Resumen por series</h3>
@@ -450,19 +459,6 @@ th,td{{border:1px solid #eee; padding:8px; text-align:left;}}
 
 
 # ---------------------------------------------------------------
-# CALLBACK AUTO-AVANCE
-# ---------------------------------------------------------------
-def on_answer_change(item_id: int, value: int):
-    st.session_state.answers[item_id] = value
-    if st.session_state.q_idx < TOTAL_ITEMS - 1:
-        st.session_state.q_idx += 1
-    else:
-        st.session_state.stage = "resultados"
-        st.session_state.fecha = datetime.now().strftime("%d/%m/%Y %H:%M")
-    st.session_state._needs_rerun = True
-
-
-# ---------------------------------------------------------------
 # VISTAS
 # ---------------------------------------------------------------
 def view_inicio():
@@ -476,6 +472,7 @@ def view_inicio():
         </div>
         """, unsafe_allow_html=True
     )
+    
     c1, c2 = st.columns([1.35,1])
     with c1:
         st.markdown(
@@ -490,64 +487,72 @@ def view_inicio():
             </div>
             """, unsafe_allow_html=True
         )
+    
     with c2:
         st.markdown(
             """
             <div class="card">
               <h3 style="margin-top:0">Origen de las imágenes</h3>
-              <p>Pega aquí la URL <b>RAW</b> de tu PDF <code>Test de Raven_Mejorar_OCR.pdf</code> en GitHub, o deja vacío para usar un PDF local llamado <code>raven_source.pdf</code> (si lo subiste al repo).</p>
+              <p>Pega aquí la URL <b>RAW</b> de tu PDF en GitHub, o deja vacío para usar un PDF local llamado <code>raven_source.pdf</code>.</p>
             </div>
             """, unsafe_allow_html=True
         )
-        st.session_state.pdf_url = st.text_input(
+        
+        url_input = st.text_input(
             "URL RAW del PDF en GitHub (opcional)",
             value=st.session_state.pdf_url,
-            placeholder="https://raw.githubusercontent.com/tuusuario/turepo/main/Test%20de%20Raven_Mejorar_OCR.pdf"
+            placeholder="https://raw.githubusercontent.com/usuario/repo/main/archivo.pdf",
+            key="url_input"
         )
+        st.session_state.pdf_url = url_input
 
-        if st.button("🔽 Cargar/actualizar PDF", type="secondary", use_container_width=True):
-            # Descargar si hay URL
-            local_path = None
-            if st.session_state.pdf_url:
-                local_path = download_pdf(st.session_state.pdf_url)
-                if not local_path:
-                    st.error("No pude descargar el PDF desde esa URL. Verifica el enlace RAW y tu conexión.")
-            else:
-                # Intentar usar archivo local ya presente en el contenedor
-                if os.path.exists("raven_source.pdf"):
-                    local_path = "raven_source.pdf"
-                else:
-                    st.warning("No se encontró 'raven_source.pdf' local. Proporciona una URL RAW o sube el archivo con ese nombre.")
-            if local_path:
-                pages = open_pdf(local_path)
-                if not pages:
-                    st.error("No pude abrir el PDF (falta PyMuPDF o el archivo está corrupto).")
-                else:
-                    st.success(f"PDF listo. Páginas detectadas: {pages}")
-                    st.session_state.pdf_path = local_path
-                    st.session_state.pdf_pages = pages
-                    # mapear 60 ítems a las primeras 60 páginas (o hasta donde alcance)
-                    st.session_state.page_map = [min(i, pages-1) for i in range(60)]
-                    st.session_state.doc_ready = True
-
-        if st.button("🚀 Iniciar evaluación", type="primary", use_container_width=True):
-            if not st.session_state.doc_ready:
-                # Intento final: usar local raven_source.pdf si existe
-                if not st.session_state.pdf_path and os.path.exists("raven_source.pdf"):
-                    pages = open_pdf("raven_source.pdf")
-                    if pages:
-                        st.session_state.pdf_path = "raven_source.pdf"
-                        st.session_state.pdf_pages = pages
-                        st.session_state.page_map = [min(i, pages-1) for i in range(60)]
-                        st.session_state.doc_ready = True
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("🔽 Cargar PDF", type="secondary", use_container_width=True):
+                with st.spinner("Cargando PDF..."):
+                    local_path = None
+                    if st.session_state.pdf_url:
+                        local_path = download_pdf(st.session_state.pdf_url)
+                        if not local_path:
+                            st.error("No pude descargar el PDF. Verifica el enlace RAW.")
+                    else:
+                        if os.path.exists("raven_source.pdf"):
+                            local_path = "raven_source.pdf"
+                        else:
+                            st.warning("No se encontró 'raven_source.pdf' local.")
+                    
+                    if local_path:
+                        pages = open_pdf(local_path)
+                        if not pages:
+                            st.error("No pude abrir el PDF.")
+                        else:
+                            st.success(f"✅ PDF listo. Páginas: {pages}")
+                            st.session_state.pdf_path = local_path
+                            st.session_state.pdf_pages = pages
+                            st.session_state.page_map = [min(i, pages-1) for i in range(60)]
+                            st.session_state.doc_ready = True
+        
+        with col2:
+            if st.button("🚀 Iniciar Test", type="primary", use_container_width=True):
                 if not st.session_state.doc_ready:
-                    st.error("Aún no hay PDF listo. Carga/descarga primero el PDF.")
-                    st.stop()
-            st.session_state.stage = "test"
-            st.session_state.q_idx = 0
-            st.session_state.answers = {}
-            st.session_state.fecha = None
-            st.rerun()
+                    if not st.session_state.pdf_path and os.path.exists("raven_source.pdf"):
+                        pages = open_pdf("raven_source.pdf")
+                        if pages:
+                            st.session_state.pdf_path = "raven_source.pdf"
+                            st.session_state.pdf_pages = pages
+                            st.session_state.page_map = [min(i, pages-1) for i in range(60)]
+                            st.session_state.doc_ready = True
+                    
+                    if not st.session_state.doc_ready:
+                        st.error("⚠️ Debes cargar un PDF primero.")
+                        st.stop()
+                
+                st.session_state.stage = "test"
+                st.session_state.q_idx = 0
+                st.session_state.answers = {}
+                st.session_state.fecha = None
+                st.rerun()
 
 
 def view_test():
@@ -559,18 +564,18 @@ def view_test():
 
     st.progress((i+1)/TOTAL_ITEMS, text=f"Progreso: {i+1}/{TOTAL_ITEMS}")
     st.markdown(f"<div class='dim-title'>Serie {s} — Ítem {k:02d}</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='badge'>Opciones: {n_opts}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='badge'>📋 Opciones: {n_opts}</div>", unsafe_allow_html=True)
     st.markdown("---")
 
     with st.container():
         st.markdown("<div class='card'>", unsafe_allow_html=True)
 
-        # Render on-demand la página mapeada a este ítem
+        # Render on-demand
         page_index = st.session_state.page_map[i]
         if not HAS_FITZ:
-            st.error("PyMuPDF (fitz) no está instalado. Agrégalo a requirements.txt para ver el PDF.")
+            st.error("⚠️ PyMuPDF (fitz) no está instalado. Agrégalo a requirements.txt")
         elif not st.session_state.pdf_path:
-            st.error("No hay PDF cargado. Vuelve a inicio y carga el archivo.")
+            st.error("⚠️ No hay PDF cargado.")
         else:
             img_bytes = render_page_as_image(st.session_state.pdf_path, page_index, dpi=150)
             if img_bytes:
@@ -578,22 +583,25 @@ def view_test():
                 st.image(Image.open(io.BytesIO(img_bytes)), use_container_width=True)
                 st.markdown("</div>", unsafe_allow_html=True)
             else:
-                st.warning("No pude rasterizar esta página. Verifica el PDF.")
+                st.warning("⚠️ No pude rasterizar esta página.")
 
-        # Opciones 1..n_opts (auto-avance)
-        st.markdown("<div class='options-grid'>", unsafe_allow_html=True)
+        # Opciones
+        st.markdown("### Selecciona tu respuesta:")
         cols = st.columns(n_opts)
         prev = st.session_state.answers.get(iid, None)
+        
         for opt in range(1, n_opts+1):
             with cols[opt-1]:
-                pressed = st.button(f"{opt}", use_container_width=True, key=f"opt_{iid}_{opt}")
-                if prev == opt:
-                    st.markdown("<div class='opt selected'>Seleccionado</div>", unsafe_allow_html=True)
-                else:
-                    st.markdown("<div class='opt'> </div>", unsafe_allow_html=True)
-                if pressed:
-                    on_answer_change(iid, opt)
-        st.markdown("</div>", unsafe_allow_html=True)
+                button_type = "primary" if prev == opt else "secondary"
+                if st.button(f"**{opt}**", use_container_width=True, key=f"opt_{iid}_{opt}", type=button_type):
+                    st.session_state.answers[iid] = opt
+                    if st.session_state.q_idx < TOTAL_ITEMS - 1:
+                        st.session_state.q_idx += 1
+                    else:
+                        st.session_state.stage = "resultados"
+                        st.session_state.fecha = datetime.now().strftime("%d/%m/%Y %H:%M")
+                    st.rerun()
+
         st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -616,8 +624,8 @@ def view_resultados():
     st.markdown("<div class='kpi-grid'>", unsafe_allow_html=True)
     st.markdown(f"<div class='kpi'><div class='label'>Ítems contestados</div><div class='value'>{tot['contestados']}</div></div>", unsafe_allow_html=True)
     st.markdown(f"<div class='kpi'><div class='label'>Ítems con clave</div><div class='value'>{tot['con_clave']}</div></div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='kpi'><div class='label'>Aciertos</div><div class='value'>{tot['aciertos'] if tot['aciertos'] is not None else '—'}</div></div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='kpi'><div class='label'>% Acierto</div><div class='value'>{f'{pct:.1f}%' if pct else '—'}</div></div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='kpi'><div class='label'>Aciertos</div><div class='value'>{tot['aciertos']}</div></div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='kpi'><div class='label'>% Acierto</div><div class='value'>{pct:.1f}%</div></div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("---")
@@ -626,7 +634,7 @@ def view_resultados():
         st.subheader("📊 % acierto por serie")
         st.plotly_chart(plot_series_bars(bys), use_container_width=True)
     with c2:
-        st.subheader("📈 Curva de dificultad (proxy)")
+        st.subheader("📈 Curva de dificultad")
         st.plotly_chart(plot_difficulty_curve(df), use_container_width=True)
 
     st.markdown("---")
@@ -649,25 +657,31 @@ def view_resultados():
 
     st.markdown("---")
     st.subheader("📥 Exportar informe")
-    if HAS_MPL:
-        pdf_bytes = build_pdf_report(res, fecha)
-        st.download_button(
-            "⬇️ Descargar PDF (servidor)",
-            data=pdf_bytes,
-            file_name="Informe_Raven_PRO.pdf",
-            mime="application/pdf",
-            use_container_width=True
-        )
-    else:
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if HAS_MPL:
+            pdf_bytes = build_pdf_report(res, fecha)
+            st.download_button(
+                "⬇️ Descargar PDF",
+                data=pdf_bytes,
+                file_name=f"Informe_Raven_{fecha.replace('/', '-').replace(':', '-')}.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
+        else:
+            st.info("📦 Instala Matplotlib para exportar en PDF")
+    
+    with col2:
         html_bytes = build_html_report(res, fecha)
         st.download_button(
-            "⬇️ Descargar Reporte (HTML) — Imprime como PDF",
+            "⬇️ Descargar HTML",
             data=html_bytes,
-            file_name="Informe_Raven_PRO.html",
+            file_name=f"Informe_Raven_{fecha.replace('/', '-').replace(':', '-')}.html",
             mime="text/html",
             use_container_width=True
         )
-        st.caption("Para PDF directo, instala Matplotlib en el entorno.")
 
     st.markdown("---")
     if st.button("🔄 Nueva evaluación", type="primary", use_container_width=True):
@@ -679,16 +693,15 @@ def view_resultados():
 
 
 # ---------------------------------------------------------------
-# FLUJO
+# FLUJO PRINCIPAL
 # ---------------------------------------------------------------
-if st.session_state.stage == "inicio":
-    view_inicio()
-elif st.session_state.stage == "test":
-    view_test()
-else:
-    view_resultados()
+def main():
+    if st.session_state.stage == "inicio":
+        view_inicio()
+    elif st.session_state.stage == "test":
+        view_test()
+    else:
+        view_resultados()
 
-# Rerun único si lo marcó el callback
-if st.session_state._needs_rerun:
-    st.session_state._needs_rerun = False
-    st.rerun()
+if __name__ == "__main__":
+    main()

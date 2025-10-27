@@ -1,250 +1,284 @@
 import streamlit as st
-import numpy as np
-from PIL import Image, ImageDraw
-import random
 import json
+import random
+import time
+import pandas as pd
 from datetime import datetime
 import base64
-import time
+import math
+import numpy as np
 
 # Configuración inicial de la página
 st.set_page_config(
-    page_title="Test de Matrices Progresivas",
-    page_icon="🧩",
+    page_title="Test de Lógica Matemática - Analistas",
+    page_icon="🧮",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Inicialización del estado de la sesión
-def init_session_state():
-    if 'init' not in st.session_state:
-        st.session_state.init = True
-        st.session_state.test_started = False
-        st.session_state.test_completed = False
-        st.session_state.current_matrix = None
-        st.session_state.user_data = None
-        st.session_state.current_section = 'A'
-        st.session_state.current_question = 0
-        st.session_state.score = {'A': 0, 'B': 0, 'C': 0, 'D': 0, 'E': 0}
-        st.session_state.start_time = None
-        st.session_state.needs_new_matrix = True
-
-init_session_state()
-
-def create_pattern(size, difficulty, pattern_type):
-    image = Image.new('RGB', size, 'white')
-    draw = ImageDraw.Draw(image)
-    
-    if pattern_type == 'dots':
-        num_dots = int(3 + difficulty * 5)
-        spacing = size[0] // (num_dots + 1)
-        for i in range(num_dots):
-            for j in range(num_dots):
-                x = spacing * (i + 1)
-                y = spacing * (j + 1)
-                radius = 5
-                draw.ellipse([x-radius, y-radius, x+radius, y+radius], fill='black')
-    
-    elif pattern_type == 'lines':
-        num_lines = int(2 + difficulty * 4)
-        for _ in range(num_lines):
-            start_x = random.randint(0, size[0])
-            start_y = random.randint(0, size[1])
-            end_x = random.randint(0, size[0])
-            end_y = random.randint(0, size[1])
-            draw.line([(start_x, start_y), (end_x, end_y)], fill='black', width=2)
-    
-    else:  # shapes
-        shapes = ['rectangle', 'circle', 'triangle']
-        num_shapes = int(2 + difficulty * 3)
-        for _ in range(num_shapes):
-            shape = random.choice(shapes)
-            shape_size = random.randint(30, 100)
-            x = random.randint(0, size[0] - shape_size)
-            y = random.randint(0, size[1] - shape_size)
-            
-            if shape == 'rectangle':
-                draw.rectangle([x, y, x+shape_size, y+shape_size], outline='black', width=2)
-            elif shape == 'circle':
-                draw.ellipse([x, y, x+shape_size, y+shape_size], outline='black', width=2)
-            else:
-                points = [(x, y+shape_size), (x+shape_size//2, y), (x+shape_size, y+shape_size)]
-                draw.polygon(points, outline='black', width=2)
-    
-    return image
-
-def generate_matrix(difficulty):
-    size = (400, 400)
-    matrix = []
-    for i in range(3):
-        row = []
-        for j in range(3):
-            if i == 2 and j == 2:  # Última celda vacía
-                pattern = Image.new('RGB', size, 'white')
-            else:
-                pattern_type = random.choice(['dots', 'lines', 'shapes'])
-                pattern = create_pattern(size, difficulty, pattern_type)
-            row.append(pattern)
-        matrix.append(row)
-    return matrix
-
-def generate_options(difficulty):
-    size = (400, 400)
-    options = []
-    for _ in range(6):
-        pattern_type = random.choice(['dots', 'lines', 'shapes'])
-        option = create_pattern(size, difficulty, pattern_type)
-        options.append(option)
-    return options
-
-def calculate_difficulty(section, question):
-    sections = ['A', 'B', 'C', 'D', 'E']
-    section_factor = sections.index(section) / (len(sections) - 1)
-    question_factor = question / 12
-    return 0.2 + section_factor * 0.4 + question_factor * 0.4
-
-def handle_start_button():
-    name = st.session_state.name
-    age = st.session_state.age
-    education = st.session_state.education
-    
-    if name and age:
-        st.session_state.user_data = {
-            'name': name,
-            'age': age,
-            'education': education,
-            'timestamp': datetime.now().isoformat()
+# Banco de preguntas
+QUESTIONS_BANK = {
+    "secuencias": [
+        {
+            "question": "¿Qué número continúa la secuencia? 2, 6, 12, 20, 30, __",
+            "options": ["42", "40", "38", "44"],
+            "correct": "42",
+            "explanation": "Cada número aumenta en una serie que crece de 4 en 4 (+4, +6, +8, +10, +12)",
+            "difficulty": "media",
+            "time_limit": 60
+        },
+        {
+            "question": "Complete la serie: 1, 1, 2, 3, 5, 8, 13, __",
+            "options": ["21", "20", "22", "24"],
+            "correct": "21",
+            "explanation": "Serie Fibonacci: cada número es la suma de los dos anteriores",
+            "difficulty": "fácil",
+            "time_limit": 45
+        },
+        {
+            "question": "Serie: 3, 6, 12, 24, 48, __",
+            "options": ["96", "72", "86", "94"],
+            "correct": "96",
+            "explanation": "Cada número se multiplica por 2",
+            "difficulty": "fácil",
+            "time_limit": 30
         }
-        st.session_state.test_started = True
-        st.session_state.start_time = time.time()
-    else:
-        st.error("Por favor complete todos los campos requeridos")
+    ],
+    "logica": [
+        {
+            "question": "Si todos los A son B, y algunos B son C, entonces:",
+            "options": [
+                "Todos los A son C",
+                "Algunos A podrían ser C",
+                "Ningún A es C",
+                "Todos los C son A"
+            ],
+            "correct": "Algunos A podrían ser C",
+            "explanation": "Es un problema de lógica proposicional y conjuntos",
+            "difficulty": "difícil",
+            "time_limit": 90
+        },
+        {
+            "question": "En una oficina, el 60% de los empleados habla inglés y el 40% habla francés. Si el 20% habla ambos idiomas, ¿qué porcentaje no habla ninguno de los dos idiomas?",
+            "options": ["20%", "15%", "25%", "30%"],
+            "correct": "20%",
+            "explanation": "Usando teoría de conjuntos: Total = Inglés + Francés - Ambos + Ninguno -> 100 = 60 + 40 - 20 + x",
+            "difficulty": "media",
+            "time_limit": 120
+        }
+    ],
+    "analisis_numerico": [
+        {
+            "question": "Si un proyecto tiene una tasa de retorno del 15% anual, ¿cuántos años se necesitan para duplicar la inversión inicial?",
+            "options": ["4.7 años", "5.0 años", "6.7 años", "7.3 años"],
+            "correct": "5.0 años",
+            "explanation": "Usando la regla del 72: 72/15 ≈ 5 años",
+            "difficulty": "difícil",
+            "time_limit": 90
+        },
+        {
+            "question": "En una base de datos, el tiempo de búsqueda crece logarítmicamente. Si con 1000 registros tarda 2 segundos, ¿cuánto tardará aproximadamente con 8000 registros?",
+            "options": ["16 segundos", "6 segundos", "4 segundos", "8 segundos"],
+            "correct": "4 segundos",
+            "explanation": "log₂(8000/1000) = 3, entonces 2 * (3/2) = 4 segundos",
+            "difficulty": "difícil",
+            "time_limit": 120
+        }
+    ]
+}
 
-def handle_option_click(option_number):
-    if option_number == st.session_state.current_matrix['correct']:
-        st.session_state.score[st.session_state.current_section] += 1
+def init_session_state():
+    """Inicializa el estado de la sesión"""
+    if 'test_started' not in st.session_state:
+        st.session_state.test_started = False
+        st.session_state.current_question = 0
+        st.session_state.score = 0
+        st.session_state.answers = []
+        st.session_state.start_time = None
+        st.session_state.questions = []
+        st.session_state.user_data = None
+        st.session_state.test_completed = False
+
+def prepare_test():
+    """Prepara las preguntas del test"""
+    questions = []
+    # Seleccionar preguntas de cada categoría
+    for category in QUESTIONS_BANK.values():
+        questions.extend(random.sample(category, min(2, len(category))))
+    random.shuffle(questions)
+    return questions
+
+def calculate_score(answers, total_questions):
+    """Calcula el puntaje y genera recomendaciones"""
+    correct_answers = sum(1 for ans in answers if ans['is_correct'])
+    score_percentage = (correct_answers / total_questions) * 100
     
-    st.session_state.current_question += 1
-    st.session_state.needs_new_matrix = True
+    # Análisis por categoría
+    category_scores = {
+        'secuencias': [],
+        'logica': [],
+        'analisis_numerico': []
+    }
     
-    if st.session_state.current_question >= 12:
-        if st.session_state.current_section == 'E':
-            st.session_state.test_completed = True
-        else:
-            st.session_state.current_section = chr(ord(st.session_state.current_section) + 1)
-            st.session_state.current_question = 0
-            st.session_state.start_time = time.time()
+    recommendations = []
+    
+    if score_percentage < 60:
+        recommendations.append("Se recomienda reforzar conceptos básicos de lógica matemática.")
+    elif score_percentage < 80:
+        recommendations.append("Buen desempeño. Enfocarse en mejorar velocidad de resolución.")
+    else:
+        recommendations.append("Excelente desempeño. Nivel adecuado para el puesto.")
+    
+    return {
+        'score_percentage': score_percentage,
+        'correct_answers': correct_answers,
+        'total_questions': total_questions,
+        'recommendations': recommendations,
+        'category_scores': category_scores
+    }
+
+def export_results_to_csv(results):
+    """Exporta los resultados a CSV"""
+    df = pd.DataFrame([results])
+    csv = df.to_csv(index=False)
+    b64 = base64.b64encode(csv.encode()).decode()
+    href = f'<a href="data:file/csv;base64,{b64}" download="resultados_test.csv">Descargar resultados (CSV)</a>'
+    return href
 
 def main():
-    st.title("Test de Matrices Progresivas")
-
+    init_session_state()
+    
+    st.title("Test de Lógica Matemática para Analistas")
+    
     if not st.session_state.test_started:
-        st.write("### Información del participante")
-        st.text_input("Nombre completo", key="name")
-        st.number_input("Edad", min_value=5, max_value=100, key="age")
-        st.selectbox("Nivel de educación", 
-            ["Primaria", "Secundaria", "Universidad", "Postgrado"],
-            key="education")
+        st.write("### Bienvenido al Test de Lógica Matemática")
+        st.write("""
+        Este test evaluará sus habilidades en:
+        - Secuencias numéricas
+        - Lógica proposicional
+        - Análisis numérico
         
-        st.button("Comenzar test", on_click=handle_start_button)
+        Duración aproximada: 30 minutos
+        """)
+        
+        # Formulario de registro
+        st.write("### Información del candidato")
+        with st.form("registro"):
+            nombre = st.text_input("Nombre completo")
+            email = st.text_input("Email")
+            experiencia = st.selectbox(
+                "Años de experiencia",
+                ["0-1 años", "1-3 años", "3-5 años", "5+ años"]
+            )
+            
+            if st.form_submit_button("Comenzar Test"):
+                if nombre and email:
+                    st.session_state.user_data = {
+                        "nombre": nombre,
+                        "email": email,
+                        "experiencia": experiencia,
+                        "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    }
+                    st.session_state.test_started = True
+                    st.session_state.questions = prepare_test()
+                    st.session_state.start_time = time.time()
+                    st.experimental_rerun()
+                else:
+                    st.error("Por favor complete todos los campos")
     
     elif not st.session_state.test_completed:
-        # Verificar tiempo
+        # Mostrar pregunta actual
+        question = st.session_state.questions[st.session_state.current_question]
+        
+        # Mostrar tiempo restante
+        time_limit = question.get('time_limit', 60)
         if st.session_state.start_time:
             elapsed = time.time() - st.session_state.start_time
-            if elapsed > 300:  # 5 minutos
-                if st.session_state.current_section == 'E':
+            remaining = max(0, time_limit - elapsed)
+            st.progress(remaining / time_limit)
+            st.write(f"Tiempo restante: {int(remaining)} segundos")
+            
+            if remaining <= 0:
+                st.session_state.answers.append({
+                    'question': question['question'],
+                    'answer': None,
+                    'correct': question['correct'],
+                    'is_correct': False,
+                    'time_taken': time_limit
+                })
+                st.session_state.current_question += 1
+                st.session_state.start_time = time.time()
+                if st.session_state.current_question >= len(st.session_state.questions):
                     st.session_state.test_completed = True
-                    st.rerun()
-                else:
-                    st.session_state.current_section = chr(ord(st.session_state.current_section) + 1)
-                    st.session_state.current_question = 0
-                    st.session_state.start_time = time.time()
-                    st.session_state.needs_new_matrix = True
+                st.experimental_rerun()
         
-        st.write(f"### Sección {st.session_state.current_section}")
-        st.write(f"Pregunta {st.session_state.current_question + 1} de 12")
-        
-        remaining = 300 - (time.time() - st.session_state.start_time)
-        st.progress(remaining / 300)
-        st.write(f"Tiempo restante: {int(remaining)} segundos")
-        
-        if st.session_state.needs_new_matrix:
-            difficulty = calculate_difficulty(
-                st.session_state.current_section, 
-                st.session_state.current_question
-            )
-            matrix = generate_matrix(difficulty)
-            options = generate_options(difficulty)
-            st.session_state.current_matrix = {
-                'matrix': matrix,
-                'options': options,
-                'correct': random.randint(0, 5)
-            }
-            st.session_state.needs_new_matrix = False
-        
-        # Mostrar matriz
-        cols = st.columns(3)
-        for i, row in enumerate(st.session_state.current_matrix['matrix']):
-            for j, cell in enumerate(row):
-                with cols[j]:
-                    st.image(cell, use_column_width=True)
+        st.write(f"### Pregunta {st.session_state.current_question + 1} de {len(st.session_state.questions)}")
+        st.write(question["question"])
         
         # Mostrar opciones
-        st.write("### Seleccione la opción correcta:")
-        option_cols = st.columns(6)
-        for i, option in enumerate(st.session_state.current_matrix['options']):
-            with option_cols[i]:
-                st.button(
-                    f"Opción {i+1}", 
-                    key=f"opt_{i}",
-                    on_click=handle_option_click,
-                    args=(i,)
-                )
+        answer = st.radio("Seleccione una respuesta:", question["options"], key=f"q_{st.session_state.current_question}")
+        
+        if st.button("Siguiente"):
+            time_taken = time.time() - st.session_state.start_time
+            is_correct = answer == question["correct"]
+            
+            st.session_state.answers.append({
+                'question': question['question'],
+                'answer': answer,
+                'correct': question['correct'],
+                'is_correct': is_correct,
+                'time_taken': time_taken
+            })
+            
+            if is_correct:
+                st.session_state.score += 1
+            
+            st.session_state.current_question += 1
+            st.session_state.start_time = time.time()
+            
+            if st.session_state.current_question >= len(st.session_state.questions):
+                st.session_state.test_completed = True
+            
+            st.experimental_rerun()
     
     else:
+        # Mostrar resultados
         st.write("### Resultados del Test")
-        total_score = sum(st.session_state.score.values())
-        max_score = 60  # 12 preguntas * 5 secciones
-        percentile = (total_score / max_score) * 100
+        results = calculate_score(st.session_state.answers, len(st.session_state.questions))
         
-        st.write(f"Puntaje total: {total_score} de {max_score}")
-        st.write(f"Percentil: {percentile:.1f}")
+        st.write(f"Puntaje: {results['score_percentage']:.1f}%")
+        st.write(f"Respuestas correctas: {results['correct_answers']} de {results['total_questions']}")
         
-        # Clasificación
-        if percentile >= 95:
-            classification = "Capacidad intelectual superior"
-        elif percentile >= 75:
-            classification = "Por encima del promedio"
-        elif percentile >= 25:
-            classification = "Promedio"
-        elif percentile >= 5:
-            classification = "Por debajo del promedio"
-        else:
-            classification = "Necesita atención especial"
+        st.write("### Recomendaciones:")
+        for rec in results['recommendations']:
+            st.write(f"- {rec}")
         
-        st.write(f"Clasificación: {classification}")
+        # Mostrar respuestas
+        st.write("### Detalle de respuestas:")
+        for i, answer in enumerate(st.session_state.answers):
+            with st.expander(f"Pregunta {i+1}"):
+                st.write(f"Pregunta: {answer['question']}")
+                st.write(f"Su respuesta: {answer['answer'] if answer['answer'] else 'Sin responder'}")
+                st.write(f"Respuesta correcta: {answer['correct']}")
+                st.write(f"Tiempo: {answer['time_taken']:.1f} segundos")
+                
+                if answer['is_correct']:
+                    st.success("¡Correcto!")
+                else:
+                    st.error("Incorrecto")
         
-        # Resultados por sección
-        st.write("### Resultados por sección:")
-        for section, score in st.session_state.score.items():
-            st.write(f"Sección {section}: {score} de 12")
-        
-        # Preparar resultados para descargar
-        results = {
+        # Exportar resultados
+        st.write("### Exportar resultados")
+        results_data = {
             **st.session_state.user_data,
-            'total_score': total_score,
-            'percentile': percentile,
-            'classification': classification,
-            'section_scores': st.session_state.score
+            **results
         }
+        st.markdown(export_results_to_csv(results_data), unsafe_allow_html=True)
         
-        # Botón para descargar resultados
-        if st.button("Descargar resultados"):
-            json_str = json.dumps(results, indent=2)
-            b64 = base64.b64encode(json_str.encode()).decode()
-            href = f'<a href="data:file/json;base64,{b64}" download="resultados_test.json">Descargar JSON</a>'
-            st.markdown(href, unsafe_allow_html=True)
+        if st.button("Realizar nuevo test"):
+            for key in st.session_state.keys():
+                del st.session_state[key]
+            st.experimental_rerun()
 
 if __name__ == "__main__":
     main()

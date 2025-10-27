@@ -1,13 +1,10 @@
 import streamlit as st
 import numpy as np
-import pandas as pd
 from PIL import Image, ImageDraw
 import random
 import json
 from datetime import datetime
-import os
 import base64
-import io
 import time
 
 # Configuración inicial de la página
@@ -19,148 +16,152 @@ st.set_page_config(
 )
 
 # Inicialización del estado de la sesión
-if 'test_started' not in st.session_state:
-    st.session_state.test_started = False
-if 'test_completed' not in st.session_state:
-    st.session_state.test_completed = False
-if 'current_matrix' not in st.session_state:
-    st.session_state.current_matrix = None
-if 'user_data' not in st.session_state:
-    st.session_state.user_data = None
-if 'current_section' not in st.session_state:
-    st.session_state.current_section = 'A'
-if 'current_question' not in st.session_state:
-    st.session_state.current_question = 0
-if 'score' not in st.session_state:
-    st.session_state.score = {'A': 0, 'B': 0, 'C': 0, 'D': 0, 'E': 0}
-if 'start_time' not in st.session_state:
-    st.session_state.start_time = None
+def init_session_state():
+    if 'init' not in st.session_state:
+        st.session_state.init = True
+        st.session_state.test_started = False
+        st.session_state.test_completed = False
+        st.session_state.current_matrix = None
+        st.session_state.user_data = None
+        st.session_state.current_section = 'A'
+        st.session_state.current_question = 0
+        st.session_state.score = {'A': 0, 'B': 0, 'C': 0, 'D': 0, 'E': 0}
+        st.session_state.start_time = None
+        st.session_state.needs_new_matrix = True
 
-class PatternGenerator:
-    def __init__(self):
-        self.image_size = (400, 400)
-        
-    def create_pattern(self, difficulty, pattern_type):
-        image = Image.new('RGB', self.image_size, 'white')
-        draw = ImageDraw.Draw(image)
-        
-        if pattern_type == 'dots':
-            self._draw_dot_pattern(draw, difficulty)
-        elif pattern_type == 'lines':
-            self._draw_line_pattern(draw, difficulty)
-        else:
-            self._draw_shape_pattern(draw, difficulty)
-            
-        return image
+init_session_state()
+
+def create_pattern(size, difficulty, pattern_type):
+    image = Image.new('RGB', size, 'white')
+    draw = ImageDraw.Draw(image)
     
-    def _draw_dot_pattern(self, draw, difficulty):
+    if pattern_type == 'dots':
         num_dots = int(3 + difficulty * 5)
-        spacing = self.image_size[0] // (num_dots + 1)
+        spacing = size[0] // (num_dots + 1)
         for i in range(num_dots):
             for j in range(num_dots):
                 x = spacing * (i + 1)
                 y = spacing * (j + 1)
                 radius = 5
                 draw.ellipse([x-radius, y-radius, x+radius, y+radius], fill='black')
-
-    def _draw_line_pattern(self, draw, difficulty):
+    
+    elif pattern_type == 'lines':
         num_lines = int(2 + difficulty * 4)
         for _ in range(num_lines):
-            start_x = random.randint(0, self.image_size[0])
-            start_y = random.randint(0, self.image_size[1])
-            end_x = random.randint(0, self.image_size[0])
-            end_y = random.randint(0, self.image_size[1])
+            start_x = random.randint(0, size[0])
+            start_y = random.randint(0, size[1])
+            end_x = random.randint(0, size[0])
+            end_y = random.randint(0, size[1])
             draw.line([(start_x, start_y), (end_x, end_y)], fill='black', width=2)
-
-    def _draw_shape_pattern(self, draw, difficulty):
+    
+    else:  # shapes
         shapes = ['rectangle', 'circle', 'triangle']
         num_shapes = int(2 + difficulty * 3)
         for _ in range(num_shapes):
             shape = random.choice(shapes)
-            size = random.randint(30, 100)
-            x = random.randint(0, self.image_size[0] - size)
-            y = random.randint(0, self.image_size[1] - size)
+            shape_size = random.randint(30, 100)
+            x = random.randint(0, size[0] - shape_size)
+            y = random.randint(0, size[1] - shape_size)
             
             if shape == 'rectangle':
-                draw.rectangle([x, y, x+size, y+size], outline='black', width=2)
+                draw.rectangle([x, y, x+shape_size, y+shape_size], outline='black', width=2)
             elif shape == 'circle':
-                draw.ellipse([x, y, x+size, y+size], outline='black', width=2)
+                draw.ellipse([x, y, x+shape_size, y+shape_size], outline='black', width=2)
             else:
-                points = [(x, y+size), (x+size//2, y), (x+size, y+size)]
+                points = [(x, y+shape_size), (x+shape_size//2, y), (x+shape_size, y+shape_size)]
                 draw.polygon(points, outline='black', width=2)
+    
+    return image
 
 def generate_matrix(difficulty):
-    pattern_gen = PatternGenerator()
+    size = (400, 400)
     matrix = []
     for i in range(3):
         row = []
         for j in range(3):
             if i == 2 and j == 2:  # Última celda vacía
-                pattern = Image.new('RGB', pattern_gen.image_size, 'white')
+                pattern = Image.new('RGB', size, 'white')
             else:
                 pattern_type = random.choice(['dots', 'lines', 'shapes'])
-                pattern = pattern_gen.create_pattern(difficulty, pattern_type)
+                pattern = create_pattern(size, difficulty, pattern_type)
             row.append(pattern)
         matrix.append(row)
     return matrix
 
 def generate_options(difficulty):
-    pattern_gen = PatternGenerator()
+    size = (400, 400)
     options = []
     for _ in range(6):
         pattern_type = random.choice(['dots', 'lines', 'shapes'])
-        option = pattern_gen.create_pattern(difficulty, pattern_type)
+        option = create_pattern(size, difficulty, pattern_type)
         options.append(option)
     return options
 
 def calculate_difficulty(section, question):
     sections = ['A', 'B', 'C', 'D', 'E']
     section_factor = sections.index(section) / (len(sections) - 1)
-    question_factor = question / 12  # 12 preguntas por sección
+    question_factor = question / 12
     return 0.2 + section_factor * 0.4 + question_factor * 0.4
 
-def start_test():
-    st.session_state.test_started = True
-    st.session_state.start_time = time.time()
+def handle_start_button():
+    name = st.session_state.name
+    age = st.session_state.age
+    education = st.session_state.education
+    
+    if name and age:
+        st.session_state.user_data = {
+            'name': name,
+            'age': age,
+            'education': education,
+            'timestamp': datetime.now().isoformat()
+        }
+        st.session_state.test_started = True
+        st.session_state.start_time = time.time()
+    else:
+        st.error("Por favor complete todos los campos requeridos")
 
-def check_time():
-    if st.session_state.start_time is None:
-        return True
-    elapsed = time.time() - st.session_state.start_time
-    return elapsed <= 300  # 5 minutos por sección
+def handle_option_click(option_number):
+    if option_number == st.session_state.current_matrix['correct']:
+        st.session_state.score[st.session_state.current_section] += 1
+    
+    st.session_state.current_question += 1
+    st.session_state.needs_new_matrix = True
+    
+    if st.session_state.current_question >= 12:
+        if st.session_state.current_section == 'E':
+            st.session_state.test_completed = True
+        else:
+            st.session_state.current_section = chr(ord(st.session_state.current_section) + 1)
+            st.session_state.current_question = 0
+            st.session_state.start_time = time.time()
 
 def main():
     st.title("Test de Matrices Progresivas")
 
     if not st.session_state.test_started:
         st.write("### Información del participante")
-        name = st.text_input("Nombre completo")
-        age = st.number_input("Edad", min_value=5, max_value=100)
-        education = st.selectbox("Nivel de educación", 
-            ["Primaria", "Secundaria", "Universidad", "Postgrado"])
+        st.text_input("Nombre completo", key="name")
+        st.number_input("Edad", min_value=5, max_value=100, key="age")
+        st.selectbox("Nivel de educación", 
+            ["Primaria", "Secundaria", "Universidad", "Postgrado"],
+            key="education")
         
-        if st.button("Comenzar test"):
-            if name and age:
-                st.session_state.user_data = {
-                    'name': name,
-                    'age': age,
-                    'education': education,
-                    'timestamp': datetime.now().isoformat()
-                }
-                start_test()
-                st.experimental_rerun()
-            else:
-                st.error("Por favor complete todos los campos requeridos")
+        st.button("Comenzar test", on_click=handle_start_button)
     
     elif not st.session_state.test_completed:
-        if not check_time():
-            st.session_state.current_section = chr(ord(st.session_state.current_section) + 1)
-            st.session_state.current_question = 0
-            st.session_state.start_time = time.time()
-            if st.session_state.current_section > 'E':
-                st.session_state.test_completed = True
-                st.experimental_rerun()
-            
+        # Verificar tiempo
+        if st.session_state.start_time:
+            elapsed = time.time() - st.session_state.start_time
+            if elapsed > 300:  # 5 minutos
+                if st.session_state.current_section == 'E':
+                    st.session_state.test_completed = True
+                    st.rerun()
+                else:
+                    st.session_state.current_section = chr(ord(st.session_state.current_section) + 1)
+                    st.session_state.current_question = 0
+                    st.session_state.start_time = time.time()
+                    st.session_state.needs_new_matrix = True
+        
         st.write(f"### Sección {st.session_state.current_section}")
         st.write(f"Pregunta {st.session_state.current_question + 1} de 12")
         
@@ -168,7 +169,7 @@ def main():
         st.progress(remaining / 300)
         st.write(f"Tiempo restante: {int(remaining)} segundos")
         
-        if st.session_state.current_matrix is None:
+        if st.session_state.needs_new_matrix:
             difficulty = calculate_difficulty(
                 st.session_state.current_section, 
                 st.session_state.current_question
@@ -180,6 +181,7 @@ def main():
                 'options': options,
                 'correct': random.randint(0, 5)
             }
+            st.session_state.needs_new_matrix = False
         
         # Mostrar matriz
         cols = st.columns(3)
@@ -193,22 +195,12 @@ def main():
         option_cols = st.columns(6)
         for i, option in enumerate(st.session_state.current_matrix['options']):
             with option_cols[i]:
-                if st.button(f"Opción {i+1}", key=f"opt_{i}"):
-                    if i == st.session_state.current_matrix['correct']:
-                        st.session_state.score[st.session_state.current_section] += 1
-                    
-                    st.session_state.current_question += 1
-                    st.session_state.current_matrix = None
-                    
-                    if st.session_state.current_question >= 12:
-                        if st.session_state.current_section == 'E':
-                            st.session_state.test_completed = True
-                        else:
-                            st.session_state.current_section = chr(ord(st.session_state.current_section) + 1)
-                            st.session_state.current_question = 0
-                            st.session_state.start_time = time.time()
-                    
-                    st.experimental_rerun()
+                st.button(
+                    f"Opción {i+1}", 
+                    key=f"opt_{i}",
+                    on_click=handle_option_click,
+                    args=(i,)
+                )
     
     else:
         st.write("### Resultados del Test")
@@ -238,7 +230,7 @@ def main():
         for section, score in st.session_state.score.items():
             st.write(f"Sección {section}: {score} de 12")
         
-        # Guardar resultados
+        # Preparar resultados para descargar
         results = {
             **st.session_state.user_data,
             'total_score': total_score,
